@@ -19,8 +19,8 @@ image = Image.open("assets/example_image/human.jpeg")
 # Run the pipeline
 outputs = pipeline.run(
     image,
-    # Optional parameters
     seed=1,
+    # Optional parameters
     # sparse_structure_sampler_params={
     #     "steps": 12,
     #     "cfg_strength": 7.5,
