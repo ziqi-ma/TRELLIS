@@ -59,8 +59,18 @@ class Pipeline:
         for model in self.models.values():
             model.to(device)
 
+    def train(self) -> None:
+        for model in self.models.values():
+            model.train()
+
+    def eval(self) -> None:
+        for model in self.models.values():
+            model.eval()
+
     def cuda(self) -> None:
         self.to(torch.device("cuda"))
 
     def cpu(self) -> None:
         self.to(torch.device("cpu"))
+
+    

@@ -228,8 +228,12 @@ class SLatFlowModel(nn.Module):
                 nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
 
         # Zero-out output layers:
-        nn.init.constant_(self.out_layer.weight, 0)
-        nn.init.constant_(self.out_layer.bias, 0)
+        #nn.init.constant_(self.out_layer.weight, 0)
+        #nn.init.constant_(self.out_layer.bias, 0)
+
+        nn.init.normal_(self.out_layer.weight, 0)
+        nn.init.normal_(self.out_layer.bias, 0)
+
 
     def forward(self, x: sp.SparseTensor, t: torch.Tensor, cond: torch.Tensor) -> sp.SparseTensor:
         h = self.input_layer(x).type(self.dtype)

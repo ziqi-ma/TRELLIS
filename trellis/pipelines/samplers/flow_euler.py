@@ -43,7 +43,58 @@ class FlowEulerSampler(Sampler):
         pred_v = self._inference_model(model, x_t, t, cond, **kwargs)
         pred_x_0, pred_eps = self._v_to_xstart_eps(x_t=x_t, t=t, v=pred_v)
         return pred_x_0, pred_eps, pred_v
+    
+    def sample_xt(self, x0, epsilon, t):
+        """
+        Draw a sample from (1-t)x0+(sigmamin+(1-sigmamin)*t)*epsilon
+        t is unif random in 0-1
 
+        Parameters
+        ----------
+        x0 : Tensor, shape (bs, *dim)
+            represents the ground truth
+        epsilon : Tensor, shape (bs, *dim)
+            noise sample from N(0, 1)
+        t: random time, unif random in 0-1
+
+        Returns
+        -------
+        xt : Tensor, shape (bs, *dim)
+        """
+        xt = (1-t)*x0+(self.sigma_min+(1-self.sigma_min)*t)*epsilon
+        return xt
+    
+    def sample_loss(
+            self,
+            model,
+            noise,
+            x0,
+            cond: Optional[Any] = None,
+            steps: int = 50,
+            rescale_t: float = 1.0,
+            verbose: bool = True,
+            **kwargs):
+        """
+        Draw a random xt and epsilon to calculate loss Exp||v(x_t,t)-(eps-x_0)||^2
+
+        Parameters
+        ----------
+        x0 : Tensor, shape (bs, *dim)
+            represents the ground truth
+
+        Returns
+        -------
+        loss : Tensor, shape (bs, *dim)
+        """
+        t = torch.rand(1).to(model.device)
+        x_t = self.sample_xt(x0, noise, t).to(model.device)
+        pred_v = self._inference_model(model, x_t, t, cond, **kwargs)
+        print(t)
+        print(pred_v.feats)
+        print((noise-x0).feats)
+        loss = ((pred_v.feats - (noise-x0).feats)**2).mean()
+        return loss
+    
     @torch.no_grad()
     def sample_once(
         self,

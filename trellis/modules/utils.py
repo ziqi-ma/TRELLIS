@@ -1,5 +1,6 @@
 import torch.nn as nn
 from ..modules import sparse as sp
+import torch
 
 FP16_MODULES = (
     nn.Conv1d,
@@ -21,6 +22,7 @@ def convert_module_to_f16(l):
     if isinstance(l, FP16_MODULES):
         for p in l.parameters():
             p.data = p.data.half()
+            #p.data = p.data.to(torch.bfloat16)
 
 
 def convert_module_to_f32(l):
