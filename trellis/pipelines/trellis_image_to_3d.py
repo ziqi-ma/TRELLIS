@@ -318,7 +318,7 @@ class TrellisImageTo3DPipeline(Pipeline):
         cond = self.get_cond([image])
         torch.manual_seed(seed)
         coords = self.sample_sparse_structure(cond, num_samples, sparse_structure_sampler_params)
-        visualize_pts(coords[:,1:], torch.zeros(coords[:,1:].shape))
+        #visualize_pts(coords[:,1:], torch.zeros(coords[:,1:].shape))
         slat = self.sample_slat(cond, coords, slat_sampler_params)
         return self.decode_slat(slat, formats)
 

@@ -7,6 +7,6 @@ if __name__ == "__main__":
     human_lat = torch.load("overfit/human_feat.pt")
     robot_xyz = torch.load("overfit/robot_coords.pt")
     robot_lat = torch.load("overfit/robot_feat.pt")
-    lr = 1
-    n_epoch = 300
+    lr = 5e-5
+    n_epoch = 5000
     train(lr, n_epoch, human_xyz, human_lat, robot_xyz, robot_lat)

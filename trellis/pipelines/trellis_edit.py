@@ -19,6 +19,11 @@ from .samplers.flow_euler import FlowEulerGuidanceIntervalSampler
 from ..models.sparse_structure_vae import SparseStructureEncoder, SparseStructureDecoder
 from ..models.structured_latent_flow import SLatFlowModel
 from ..models.sparse_structure_flow import SparseStructureFlowModel
+from ..models.structured_latent_vae import SLatMeshDecoder, SLatGaussianDecoder, SLatRadianceFieldDecoder
+from safetensors.torch import load_model
+from torch.optim.lr_scheduler import CosineAnnealingLR
+import imageio
+from trellis.utils import render_utils, postprocessing_utils
 
 def visualize_pts(points, colors, save_path=None, save_rendered_path=None):
 
@@ -141,13 +146,26 @@ class TrellisEdit3DPipeline(Pipeline):
                                         "cfg_interval": [0.5, 1.0],
                                         "rescale_t": 3.0}
         pipeline.models = {}
+        pipeline.models['sparse_structure_encoder'] = SparseStructureEncoder(
+            in_channels=1,
+            latent_channels=8,
+            num_res_blocks=2,
+            num_res_blocks_middle=2,
+            channels=[32, 128, 512],
+            use_fp16=True
+        )
+        load_model(pipeline.models['sparse_structure_encoder'], "/data/ziqi/checkpoints/trellis/ss_enc_conv3d_16l8_fp16.safetensors")
+        
         pipeline.models["sparse_structure_decoder"] = SparseStructureDecoder(
             out_channels=1,
             latent_channels=8,
             num_res_blocks=2,
             num_res_blocks_middle=2,
             channels=[512, 128, 32],
-            use_fp16=True)
+            use_fp16=True
+        )
+        load_model(pipeline.models['sparse_structure_decoder'], "/data/ziqi/checkpoints/trellis/ss_dec_conv3d_16l8_fp16.safetensors")
+        
         pipeline.models["sparse_structure_flow_model"] = SparseStructureFlowModel(
             resolution=16,
             in_channels=8,
@@ -160,7 +178,7 @@ class TrellisEdit3DPipeline(Pipeline):
             patch_size=1,
             pe_mode="ape",
             qk_rms_norm=True,
-            use_fp16=True)
+            use_fp16=False)
         
         pipeline.models["slat_flow_model"]=SLatFlowModel(
             resolution=64,
@@ -178,6 +196,69 @@ class TrellisEdit3DPipeline(Pipeline):
             qk_rms_norm=True,
             use_fp16=False
         )
+
+        pipeline.models["slat_decoder_gs"]=SLatGaussianDecoder(
+            resolution=64,
+            model_channels=768,
+            latent_channels=8,
+            num_blocks=12,
+            num_heads=12,
+            mlp_ratio=4,
+            attn_mode="swin",
+            window_size=8,
+            use_fp16=True,
+            representation_config={
+                "lr": {
+                    "_xyz": 1.0,
+                    "_features_dc": 1.0,
+                    "_opacity": 1.0,
+                    "_scaling": 1.0,
+                    "_rotation": 0.1
+                },
+                "perturb_offset": True,
+                "voxel_size": 1.5,
+                "num_gaussians": 32,
+                "2d_filter_kernel_size": 0.1,
+                "3d_filter_kernel_size": 9e-4,
+                "scaling_bias": 4e-3,
+                "opacity_bias": 0.1,
+                "scaling_activation": "softplus"
+            }
+        )
+        load_model(pipeline.models["slat_decoder_gs"], "/data/ziqi/checkpoints/trellis/slat_dec_gs_swin8_B_64l8gs32_fp16.safetensors")
+
+        pipeline.models["slat_decoder_rf"] = SLatRadianceFieldDecoder(
+            resolution=64,
+            model_channels=768,
+            latent_channels=8,
+            num_blocks=12,
+            num_heads=12,
+            mlp_ratio=4,
+            attn_mode="swin",
+            window_size=8,
+            use_fp16=True,
+            representation_config={
+            "rank": 16,
+            "dim": 8
+            }
+        )
+        load_model(pipeline.models["slat_decoder_rf"], "/data/ziqi/checkpoints/trellis/slat_dec_rf_swin8_B_64l8r16_fp16.safetensors")
+
+        pipeline.models["slat_decoder_mesh"]=SLatMeshDecoder(
+            resolution=64,
+            model_channels=768,
+            latent_channels=8,
+            num_blocks=12,
+            num_heads=12,
+            mlp_ratio=4,
+            attn_mode="swin",
+            window_size=8,
+            use_fp16=True,
+            representation_config={
+                "use_color": True
+            }
+        )
+        load_model(pipeline.models["slat_decoder_mesh"], "/data/ziqi/checkpoints/trellis/slat_dec_mesh_swin8_B_64l8m256c_fp16.safetensors")
 
         pipeline.slat_normalization = {"mean": [
             -2.1687545776367188,
@@ -319,6 +400,7 @@ class TrellisEdit3DPipeline(Pipeline):
         """
         # Sample structured latent
         flow_model = self.models['slat_flow_model']
+        print(coords.shape)
         noise = sp.SparseTensor(
             feats=torch.randn(coords.shape[0], flow_model.in_channels).to(self.device),
             coords=coords,
@@ -366,7 +448,7 @@ class TrellisEdit3DPipeline(Pipeline):
         mean = torch.tensor(self.slat_normalization['mean'])[None].to(self.device)
         gt_slat_normalized = (gt_slat - mean) / std
 
-        slat = self.slat_sampler.sample_loss(
+        slat_loss = self.slat_sampler.sample_loss(
             flow_model,
             noise,
             gt_slat_normalized,
@@ -374,7 +456,47 @@ class TrellisEdit3DPipeline(Pipeline):
             **sampler_params,
             verbose=True)
         
-        return slat
+        return slat_loss
+    
+
+    def sample_sparse_structure_loss(
+        self,
+        cond: dict,
+        gt_coords: torch.Tensor,
+        num_samples: int = 1,
+        sampler_params: dict = {},
+    ) -> sp.SparseTensor:
+        """
+        Sample structured latent with the given conditioning.
+        
+        Args:
+            cond (dict): The conditioning information.
+            coords (torch.Tensor): The coordinates of the sparse structure.
+            sampler_params (dict): Additional parameters for the sampler.
+        """
+        flow_model = self.models['sparse_structure_flow_model']
+        reso = flow_model.resolution
+        noise = torch.randn(num_samples, flow_model.in_channels, reso, reso, reso).to(self.device)
+        sampler_params = {**self.sparse_structure_sampler_params, **sampler_params}
+        gt_coords = gt_coords.to(self.device)
+        # transform gt_coords to the 64*64*64 shape
+        gt_sparse = torch.zeros((num_samples, self.models['sparse_structure_encoder'].in_channels, 64,64,64)).cuda()
+        zeros = torch.zeros(gt_sparse.shape[0]).int()
+        gt_sparse[zeros,zeros,gt_coords[:,0],gt_coords[:,1],gt_coords[:,2]] = 1
+        # encode ground truth and just calculate loss on latent space since the flow
+        # model operates on this space
+        gt_encoded = self.models['sparse_structure_encoder'](gt_sparse).float()
+
+        z_s_loss = self.sparse_structure_sampler.sample_loss(
+            flow_model,
+            noise,
+            gt_encoded,
+            **cond,
+            **sampler_params,
+            verbose=True
+        )
+        
+        return z_s_loss
 
     @torch.no_grad()
     def run(
@@ -403,8 +525,7 @@ class TrellisEdit3DPipeline(Pipeline):
         coords = self.sample_sparse_structure(cond, num_samples, sparse_structure_sampler_params)
         #visualize_pts(coords[:,1:], torch.zeros(coords[:,1:].shape))
         slat = self.sample_slat(cond, coords, slat_sampler_params)
-        torch.save(coords[:,1:].cpu(), "robot_coords.pt")
-        torch.save(slat.feats.cpu(), "robot_feat.pt")
+        torch.save(slat, 'edited.pt')
         decoded = self.decode_slat(slat, formats)
         return decoded
     
@@ -416,7 +537,6 @@ class TrellisEdit3DPipeline(Pipeline):
         output_coords,
         output_latent,
         num_samples: int = 1,
-        seed: int = 42,
         sparse_structure_sampler_params: dict = {},
         slat_sampler_params: dict = {}
     ) -> dict:
@@ -432,20 +552,78 @@ class TrellisEdit3DPipeline(Pipeline):
             preprocess_image (bool): Whether to preprocess the image.
         """
         cond = self.get_cond(input_coords, input_latent)
-        torch.manual_seed(seed)
         #coords = self.sample_sparse_structure(cond, num_samples, sparse_structure_sampler_params)
-        #visualize_pts(coords[:,1:], torch.zeros(coords[:,1:].shape))
-        #slat = self.sample_slat(cond, coords, slat_sampler_params)
         gt_coords = torch.cat([torch.zeros(output_coords.shape[0],1), output_coords], dim=1).int()
         loss = self.sample_slat_loss(cond, gt_coords, output_latent, slat_sampler_params)
         return loss
-
-
-def train(lr, n_epoch, input_coords, input_latents, output_coords, output_latents):
     
+    def get_sparse_structure_loss(
+        self,
+        input_coords,
+        input_latent,
+        output_coords,
+        num_samples: int = 1,
+        sparse_structure_sampler_params: dict = {},
+        slat_sampler_params: dict = {}
+    ) -> dict:
+        """
+        Run the pipeline.
+
+        Args:
+            input_coords: input object's coordinates
+            input_latent: input object's latent
+            num_samples (int): The number of samples to generate.
+            sparse_structure_sampler_params (dict): Additional parameters for the sparse structure sampler.
+            slat_sampler_params (dict): Additional parameters for the structured latent sampler.
+            preprocess_image (bool): Whether to preprocess the image.
+        """
+        cond = self.get_cond(input_coords, input_latent)
+        #gt_coords = torch.cat([torch.zeros(output_coords.shape[0],1), output_coords], dim=1).int()
+        loss = self.sample_sparse_structure_loss(
+            cond,
+            output_coords,
+            sampler_params=sparse_structure_sampler_params
+        )
+        return loss
+    
+    def get_all_loss(
+        self,
+        input_coords,
+        input_latent,
+        output_coords,
+        output_latent,
+        num_samples: int = 1,
+        sparse_structure_sampler_params: dict = {},
+        slat_sampler_params: dict = {}
+    ) -> dict:
+        """
+        Run the pipeline.
+
+        Args:
+            input_coords: input object's coordinates
+            input_latent: input object's latent
+            num_samples (int): The number of samples to generate.
+            sparse_structure_sampler_params (dict): Additional parameters for the sparse structure sampler.
+            slat_sampler_params (dict): Additional parameters for the structured latent sampler.
+            preprocess_image (bool): Whether to preprocess the image.
+        """
+        cond = self.get_cond(input_coords, input_latent)
+        sparse_structure_loss = self.sample_sparse_structure_loss(
+            cond,
+            output_coords,
+            sparse_structure_sampler_params
+        )
+        gt_coords = torch.cat([torch.zeros(output_coords.shape[0],1), output_coords], dim=1).int()
+        latent_loss = self.sample_slat_loss(cond, gt_coords, output_latent, slat_sampler_params)
+        return sparse_structure_loss, latent_loss
+
+
+def train(lr, n_epoch, input_coords, input_latents, output_coords, output_latents, grad_clip=0.2):
+    
+    torch.manual_seed(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     run = wandb.init(project="trellis-overfit")
-
+    
     #scaler = torch.cuda.amp.GradScaler()
     pipeline = TrellisEdit3DPipeline.init_models()
     pipeline.to(device) # this is moving all models
@@ -453,31 +631,84 @@ def train(lr, n_epoch, input_coords, input_latents, output_coords, output_latent
     pipeline.latent_proj_layer.to(device)
     pipeline.pos_emb_proj.to(device)
     pipeline.train()
-    #opt = optim.Adam(list(pipeline.models['sparse_structure_flow_model'].parameters()) + list(pipeline.models["slat_flow_model"].parameters()) + list(pipeline.latent_proj_layer.parameters()) + list(pipeline.pos_emb_proj.parameters()), lr=lr)
-    #opt = optim.Adam(pipeline.models["slat_flow_model"].parameters(), lr=lr)
-    opt = optim.SGD(pipeline.models["slat_flow_model"].parameters(), lr=lr)
+    opt_ss = optim.Adam(list(pipeline.models['sparse_structure_flow_model'].parameters()) + list(pipeline.models["slat_flow_model"].parameters()) + list(pipeline.latent_proj_layer.parameters()) + list(pipeline.pos_emb_proj.parameters()), lr=lr)
+    opt_latent = optim.Adam(list(pipeline.models["slat_flow_model"].parameters()), lr=lr)
+    scheduler_ss = CosineAnnealingLR(opt_ss,n_epoch)
+    scheduler_latent = CosineAnnealingLR(opt_latent,n_epoch)
     # we optimize the sparse generator and the latent generator at the same time, but keep the VAE fixed
     # i.e. use the existing learned latent space
-                     
-
+    
+    # we optimize in order, first just sparse generator + conditioning embedding
     iter = 0
     for epoch in range(n_epoch):
-            
         epoch = epoch + 1
-
-        loss = pipeline.get_latent_loss(input_coords, input_latents, output_coords, output_latents)
-        opt.zero_grad()
+        #loss = pipeline.get_latent_loss(input_coords, input_latents, output_coords, output_latents)
+        loss = pipeline.get_sparse_structure_loss(input_coords, input_latents, output_coords)
+        opt_ss.zero_grad()
         #scaler.scale(loss).backward()
         loss.backward()
         
         #scaler.unscale_(opt)
-        torch.nn.utils.clip_grad_norm_(pipeline.models['slat_flow_model'].parameters(), 5)
+        #torch.nn.utils.clip_grad_norm_(pipeline.models['slat_flow_model'].parameters(), grad_clip)
+        torch.nn.utils.clip_grad_norm_(pipeline.models['sparse_structure_flow_model'].parameters(), grad_clip)
         #scaler.step(opt)
-        opt.step()
+        opt_ss.step()
+        scheduler_ss.step()
         #scaler.update()
-        values_to_log = {"iter":iter, "train loss": loss.item()}
+        values_to_log = {"ss iter":iter, "train ss loss": loss.item(), "ss lr": scheduler_ss.get_last_lr()[0]}
         wandb.log(values_to_log, step=iter, commit=True)
         iter += 1
+
+    # we optimize in order, then we fit structured latent, fixing the conditional encoder
+    # this could be changed later where we also optimize the conditional encoder here, but then we need to make sure
+    # it works with the generator again
+    wandb.define_metric("latent_step")
+    wandb.define_metric("latent_loss", step_metric="latent_step")
+    wandb.define_metric("latent_lr", step_metric="latent_step")
+    iter = 0
+    for epoch in range(n_epoch):
+        epoch = epoch + 1
+        loss = pipeline.get_latent_loss(input_coords, input_latents, output_coords, output_latents)
+        opt_latent.zero_grad()
+        #scaler.scale(loss).backward()
+        loss.backward()
+        
+        #scaler.unscale_(opt)
+        torch.nn.utils.clip_grad_norm_(pipeline.models['slat_flow_model'].parameters(), grad_clip)
+        #scaler.step(opt)
+        opt_latent.step()
+        scheduler_latent.step()
+        #scaler.update()
+        values_to_log = {"latent_step":iter, "latent_loss": loss.item(), "latent_lr": scheduler_latent.get_last_lr()[0]}
+        wandb.log(values_to_log, commit=True)
+        iter += 1
+
+    # now we finished optimizing both, use the weights to decode
+    outputs = pipeline.run(
+        input_coords,
+        input_latents,
+        num_samples= 1)
+    
+    # Render the outputs
+    video = render_utils.render_video(outputs['gaussian'][0])['color']
+    imageio.mimsave("edited_gs.mp4", video, fps=30)
+    video = render_utils.render_video(outputs['radiance_field'][0])['color']
+    imageio.mimsave("edited_rf.mp4", video, fps=30)
+    video = render_utils.render_video(outputs['mesh'][0])['normal']
+    imageio.mimsave("edited_mesh.mp4", video, fps=30)
+
+    '''
+    # GLB files can be extracted from the outputs
+    glb = postprocessing_utils.to_glb(
+        outputs['gaussian'][0],
+        outputs['mesh'][0],
+        # Optional parameters
+        simplify=0.95,          # Ratio of triangles to remove in the simplification process
+        texture_size=1024,      # Size of the texture used for the GLB
+    )
+    glb.export("edited.glb")
+    '''
+
     return loss.item()
 
 

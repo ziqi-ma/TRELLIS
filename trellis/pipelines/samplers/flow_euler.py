@@ -6,7 +6,8 @@ from easydict import EasyDict as edict
 from .base import Sampler
 from .classifier_free_guidance_mixin import ClassifierFreeGuidanceSamplerMixin
 from .guidance_interval_mixin import GuidanceIntervalSamplerMixin
-
+from torch.distributions import LogisticNormal
+from ...modules import sparse as sp
 
 class FlowEulerSampler(Sampler):
     """
@@ -87,12 +88,15 @@ class FlowEulerSampler(Sampler):
         loss : Tensor, shape (bs, *dim)
         """
         t = torch.rand(1).to(model.device)
+        #t = LogisticNormal(0,1).sample()[0].to(model.device)
         x_t = self.sample_xt(x0, noise, t).to(model.device)
         pred_v = self._inference_model(model, x_t, t, cond, **kwargs)
-        print(t)
-        print(pred_v.feats)
-        print((noise-x0).feats)
-        loss = ((pred_v.feats - (noise-x0).feats)**2).mean()
+        if torch.is_tensor(pred_v) and torch.is_tensor(noise-x0):
+            loss = ((pred_v - (noise-x0))**2).mean()
+        elif isinstance(pred_v, sp.SparseTensor) and isinstance(noise-x0, sp.SparseTensor): # sparse tensor
+            loss = ((pred_v.feats - (noise-x0).feats)**2).mean()
+        else:
+            print("wrong type!")
         return loss
     
     @torch.no_grad()
