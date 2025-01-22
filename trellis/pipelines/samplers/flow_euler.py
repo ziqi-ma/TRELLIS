@@ -56,7 +56,7 @@ class FlowEulerSampler(Sampler):
             represents the ground truth
         epsilon : Tensor, shape (bs, *dim)
             noise sample from N(0, 1)
-        t: random time, unif random in 0-1
+        t: random time, unif random in 0-1, shape(bs,)
 
         Returns
         -------
@@ -65,7 +65,7 @@ class FlowEulerSampler(Sampler):
         xt = (1-t)*x0+(self.sigma_min+(1-self.sigma_min)*t)*epsilon
         return xt
     
-    def sample_loss(
+    def sample_loss_dimbatch( # batch with a distinct dimension
             self,
             model,
             noise,
@@ -87,8 +87,52 @@ class FlowEulerSampler(Sampler):
         -------
         loss : Tensor, shape (bs, *dim)
         """
-        t = torch.rand(1).to(model.device)
+        t = torch.rand(x0.shape[0]).to(model.device)
         #t = LogisticNormal(0,1).sample()[0].to(model.device)
+        x_t = self.sample_xt(x0, noise, t).to(model.device)
+        pred_v = self._inference_model(model, x_t, t, cond, **kwargs)
+        if torch.is_tensor(pred_v) and torch.is_tensor(noise-x0):
+            loss = ((pred_v - (noise-x0))**2).mean()
+        elif isinstance(pred_v, sp.SparseTensor) and isinstance(noise-x0, sp.SparseTensor): # sparse tensor
+            loss = ((pred_v.feats - (noise-x0).feats)**2).mean()
+        else:
+            print("wrong type!")
+        return loss
+    
+
+    def sample_loss_seqbatch( # batch by concatenating sequences and keeping an index
+            self,
+            model,
+            noise,
+            x0,
+            cond: Optional[Any] = None,
+            steps: int = 50,
+            rescale_t: float = 1.0,
+            verbose: bool = True,
+            **kwargs):
+        """
+        Draw a random xt and epsilon to calculate loss Exp||v(x_t,t)-(eps-x_0)||^2
+
+        Parameters
+        ----------
+        x0 : Tensor, shape (bs, *dim)
+            represents the ground truth
+
+        Returns
+        -------
+        loss : Tensor, shape (bs, *dim)
+        """
+        '''
+        if I try to get different t per sample, i.e. 8 t values if batch size=8
+        # Get unique indices and their positions
+        unique_indices, inverse_indices = torch.unique(noise.coords[:,0], return_inverse=True)
+        # Generate random values for each unique index
+        random_values = torch.rand_like(unique_indices.float())
+        # Map the random values back to the original tensor shape
+        t = random_values[inverse_indices].to(model.device).unsqueeze(1)
+        #t = LogisticNormal(0,1).sample()[0].to(model.device)
+        '''
+        t = torch.rand(1).to(model.device)
         x_t = self.sample_xt(x0, noise, t).to(model.device)
         pred_v = self._inference_model(model, x_t, t, cond, **kwargs)
         if torch.is_tensor(pred_v) and torch.is_tensor(noise-x0):

@@ -116,12 +116,12 @@ class SparseTensor:
         
     def __cal_shape(self, feats, coords):
         shape = []
-        shape.append(coords[:, 0].max().item() + 1)
+        shape.append(coords[:, 0].max().ceil().int().item() + 1)
         shape.extend([*feats.shape[1:]])
         return torch.Size(shape)
     
     def __cal_layout(self, coords, batch_size):
-        seq_len = torch.bincount(coords[:, 0], minlength=batch_size)
+        seq_len = torch.bincount(coords[:, 0].int(), minlength=batch_size)
         offset = torch.cumsum(seq_len, dim=0) 
         layout = [slice((offset[i] - seq_len[i]).item(), offset[i].item()) for i in range(batch_size)]
         return layout
@@ -252,6 +252,8 @@ class SparseTensor:
             )
             new_data._caches = self.data._caches
         elif BACKEND == 'spconv':
+            import importlib
+            SparseTensorData = importlib.import_module('spconv.pytorch').SparseConvTensor
             new_data = SparseTensorData(
                 self.data.features.reshape(self.data.features.shape[0], -1),
                 self.data.indices,
