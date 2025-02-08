@@ -12,8 +12,9 @@ import rembg
 from .base import Pipeline
 from . import samplers
 from ..modules import sparse as sp
+from torch.nn.utils.rnn import pad_sequence
 from ..representations import Gaussian, Strivec, MeshExtractResult
-
+from ...control.masactrl import MutualSelfAttentionControl, register_attention_editor_slat_flow
 
 class TrellisImageTo3DPipeline(Pipeline):
     """
@@ -253,6 +254,60 @@ class TrellisImageTo3DPipeline(Pipeline):
         slat = slat * std + mean
         
         return slat
+    
+    def sample_slat_consistent(
+        self,
+        cond0: dict,
+        cond1: dict,
+        coords0: torch.Tensor,
+        coords1: torch.Tensor,
+        starting_step,
+        starting_layer,
+        sampler_params: dict = {}
+    ) -> sp.SparseTensor:
+        """
+        Sample structured latent with the given conditioning.
+        
+        Args:
+            cond (dict): The conditioning information.
+            coords (torch.Tensor): The coordinates of the sparse structure.
+            sampler_params (dict): Additional parameters for the sampler.
+        """
+        # Sample structured latent
+        flow_model = self.models['slat_flow_model']
+        
+        # pack them in sequence
+        coords1[0,...] = 1
+        coords = torch.cat([coords0, coords1], dim=0)
+
+        # stack conds
+        cond_all = {}
+        for k in cond0:
+            cond_all[k] = torch.stack([cond0[k], cond1[k]])
+
+        # need padding
+        noise = sp.SparseTensor(
+            feats=torch.randn(coords.shape[0], flow_model.in_channels).to(self.device),
+            coords=coords,
+        )
+
+        controller = MutualSelfAttentionControl(starting_step, starting_layer)
+        register_attention_editor_slat_flow(flow_model, controller)
+
+        sampler_params = {**self.slat_sampler_params, **sampler_params}
+        slat = self.slat_sampler.sample(
+            flow_model,
+            noise,
+            **cond_all,
+            **sampler_params,
+            verbose=True
+        ).samples
+
+        std = torch.tensor(self.slat_normalization['std'])[None].to(slat.device)
+        mean = torch.tensor(self.slat_normalization['mean'])[None].to(slat.device)
+        slat = slat * std + mean
+        
+        return slat
 
     @torch.no_grad()
     def run(
@@ -281,6 +336,37 @@ class TrellisImageTo3DPipeline(Pipeline):
         torch.manual_seed(seed)
         coords = self.sample_sparse_structure(cond, num_samples, sparse_structure_sampler_params)
         slat = self.sample_slat(cond, coords, slat_sampler_params)
+        return self.decode_slat(slat, formats)
+    
+    @torch.no_grad()
+    def run_consistent(
+        self,
+        images: List[Image.Image],
+        num_samples: int = 1,
+        seed: int = 42,
+        sparse_structure_sampler_params: dict = {},
+        slat_sampler_params: dict = {},
+        formats: List[str] = ['mesh', 'gaussian', 'radiance_field'],
+        preprocess_image: bool = True,
+    ) -> dict:
+        """
+        Run the pipeline.
+
+        Args:
+            image (Image.Image): The image prompt.
+            num_samples (int): The number of samples to generate.
+            sparse_structure_sampler_params (dict): Additional parameters for the sparse structure sampler.
+            slat_sampler_params (dict): Additional parameters for the structured latent sampler.
+            preprocess_image (bool): Whether to preprocess the image.
+        """
+        if preprocess_image:
+            images = [self.preprocess_image(image) for image in images]
+        cond0 = self.get_cond([images[0]])
+        cond1 = self.get_cond([images[0]])
+        torch.manual_seed(seed)
+        coords0 = self.sample_sparse_structure(cond0, num_samples, sparse_structure_sampler_params)
+        coords1 = self.sample_sparse_structure(cond1, num_samples, sparse_structure_sampler_params)
+        slat = self.sample_slat_consistent(cond0, cond1, coords0, coords1, slat_sampler_params)
         return self.decode_slat(slat, formats)
 
     @contextmanager
