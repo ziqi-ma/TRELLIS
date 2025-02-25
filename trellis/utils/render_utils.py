@@ -87,7 +87,7 @@ def render_frames(sample, extrinsics, intrinsics, options={}, colors_overwrite=N
     return rets
 
 
-def render_video(sample, resolution=512, bg_color=(0, 0, 0), num_frames=300, r=2, fov=40, **kwargs):
+def render_video(sample, resolution=512, bg_color=(0, 0, 0), num_frames=300, r=2, fov=80, **kwargs):
     yaws = torch.linspace(0, 2 * 3.1415, num_frames)
     pitch = 0.25 + 0.5 * torch.sin(torch.linspace(0, 2 * 3.1415, num_frames))
     yaws = yaws.tolist()
@@ -106,6 +106,13 @@ def render_multiview(sample, resolution=512, nviews=30):
     res = render_frames(sample, extrinsics, intrinsics, {'resolution': resolution, 'bg_color': (0, 0, 0)})
     return res['color'], extrinsics, intrinsics
 
+def render_video_custom_view(sample, extrinsics, fovs, resolution=512, bg_color=(0, 0, 0), num_frames=300, r=2, **kwargs):
+    intrinsics = []
+    for fov in fovs:
+        fov = torch.deg2rad(torch.tensor(float(fov))).cuda()
+        intr = utils3d.torch.intrinsics_from_fov_xy(fov, fov)
+        intrinsics += [intr]
+    return render_frames(sample, extrinsics, intrinsics, {'resolution': resolution, 'bg_color': bg_color}, **kwargs)
 
 def render_snapshot(samples, resolution=512, bg_color=(0, 0, 0), offset=(-16 / 180 * np.pi, 20 / 180 * np.pi), r=10, fov=8, **kwargs):
     yaw = [0, np.pi/2, np.pi, 3*np.pi/2]

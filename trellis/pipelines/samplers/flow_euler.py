@@ -6,7 +6,8 @@ from easydict import EasyDict as edict
 from .base import Sampler
 from .classifier_free_guidance_mixin import ClassifierFreeGuidanceSamplerMixin
 from .guidance_interval_mixin import GuidanceIntervalSamplerMixin
-
+import math
+from trellis.models.structured_latent_flow import SLatFlowModel
 
 class FlowEulerSampler(Sampler):
     """
@@ -46,6 +47,35 @@ class FlowEulerSampler(Sampler):
 
     @torch.no_grad()
     def sample_once(
+        self,
+        model,
+        x_t,
+        t: float,
+        t_prev: float,
+        cond: Optional[Any] = None,
+        **kwargs
+    ):
+        """
+        Sample x_{t-1} from the model using Euler method.
+        
+        Args:
+            model: The model to sample from.
+            x_t: The [N x C x ...] tensor of noisy inputs at time t.
+            t: The current timestep.
+            t_prev: The previous timestep.
+            cond: conditional information.
+            **kwargs: Additional arguments for model inference.
+
+        Returns:
+            a dict containing the following
+            - 'pred_x_prev': x_{t-1}.
+            - 'pred_x_0': a prediction of x_0.
+        """
+        pred_x_0, pred_eps, pred_v = self._get_model_prediction(model, x_t, t, cond, **kwargs)
+        pred_x_prev = x_t - (t - t_prev) * pred_v
+        return edict({"pred_x_prev": pred_x_prev, "pred_x_0": pred_x_0})
+    
+    def sample_once_with_grad(
         self,
         model,
         x_t,
@@ -115,6 +145,166 @@ class FlowEulerSampler(Sampler):
             ret.pred_x_0.append(out.pred_x_0)
         ret.samples = sample
         return ret
+
+    @torch.no_grad()
+    def sample_noised(
+        self,
+        model,
+        noise,
+        cond: Optional[Any] = None,
+        steps: int = 50,
+        rescale_t: float = 1.0,
+        verbose: bool = True,
+        **kwargs
+    ):
+        """
+        Generate samples from the model using Euler method.
+        
+        Args:
+            model: The model to sample from.
+            noise: The initial noise tensor.
+            cond: conditional information.
+            steps: The number of steps to sample.
+            rescale_t: The rescale factor for t.
+            verbose: If True, show a progress bar.
+            **kwargs: Additional arguments for model_inference.
+
+        Returns:
+            a dict containing the following
+            - 'samples': the model samples.
+            - 'pred_x_t': a list of prediction of x_t.
+            - 'pred_x_0': a list of prediction of x_0.
+        """
+        sample = noise
+        steps = 100
+        t_seq = np.linspace(1, 0, steps + 1)
+        
+        t_seq = rescale_t * t_seq / (1 + (rescale_t - 1) * t_seq)
+        t_pairs = list((t_seq[i], t_seq[i + 1]) for i in range(steps))
+        ret = edict({"samples": None, "pred_x_t": [], "pred_x_0": []})
+        for t, t_prev in tqdm(t_pairs, desc="Sampling", disable=not verbose):
+            out = self.sample_once(model, sample, t, t_prev, cond, **kwargs)
+            sample = out.pred_x_prev
+            if t_prev > 0:
+                # add noise
+                alpha_t_sqr = 1/(1+t**2)
+                alpha_t_prev_sqr = 1/(1+t_prev**2)
+                #var_diff = (alpha_t_prev1_sqr - alpha_t_prev2_sqr)/50
+                sigma_sqr = (1-alpha_t_prev_sqr)/(1-alpha_t_sqr)*(1-alpha_t_sqr/alpha_t_prev_sqr) /5
+
+                # draw gaussian noise
+                eps = torch.randn(sample.shape).to(sample.device)
+                sample = sample + sigma_sqr**0.5 * eps
+
+
+            ret.pred_x_t.append(out.pred_x_prev)
+            ret.pred_x_0.append(out.pred_x_0)
+        ret.samples = sample
+        return ret
+    
+    @torch.no_grad()
+    def sample_noised_with_logprobs(
+        self,
+        model,
+        noise,
+        cond: Optional[Any] = None,
+        eta = 0.2,
+        steps: int = 50,
+        rescale_t: float = 1.0,
+        verbose: bool = True,
+        **kwargs
+    ):
+        """
+        Generate samples from the model using Euler method.
+        
+        Args:
+            model: The model to sample from.
+            noise: The initial noise tensor.
+            cond: conditional information.
+            steps: The number of steps to sample.
+            rescale_t: The rescale factor for t.
+            verbose: If True, show a progress bar.
+            **kwargs: Additional arguments for model_inference.
+
+        Returns:
+            a dict containing the following
+            - 'samples': the model samples.
+            - 'pred_x_t': a list of prediction of x_t.
+            - 'pred_x_0': a list of prediction of x_0.
+        """
+        sample = noise
+        steps = 100
+        t_seq = np.linspace(1, 0, steps + 1)
+        
+        t_seq = rescale_t * t_seq / (1 + (rescale_t - 1) * t_seq)
+        t_pairs = list((t_seq[i], t_seq[i + 1]) for i in range(steps))
+        ret = edict({"samples": None, "latents": [sample], "logprobs":[]})
+        for t, t_prev in tqdm(t_pairs, desc="Sampling", disable=not verbose):
+            out = self.sample_once(model, sample, t, t_prev, cond, **kwargs)
+            sample = out.pred_x_prev
+            if t_prev > 0:
+                # add noise
+                alpha_t_sqr = 1/(1+t**2)
+                alpha_t_prev_sqr = 1/(1+t_prev**2)
+                sigma_sqr = (1-alpha_t_prev_sqr)/(1-alpha_t_sqr)*(1-alpha_t_sqr/alpha_t_prev_sqr) *eta
+                sigma_sqr = torch.tensor(sigma_sqr)
+
+                # draw gaussian noise
+                k = sample.feats.view(-1).shape[0]
+                eps = torch.randn(sample.feats.shape).to(sample.device)/(k**0.5)
+                sample = sample + sigma_sqr**0.5 * eps
+
+                # calculate log probs by using mean=out.pred_x_prev, var=sigma_sqr
+                log_prob = (
+                    -((sample.detach().feats - out.pred_x_prev.feats) ** 2).sum() / (2 * sigma_sqr)
+                    - torch.log(sigma_sqr**0.5)
+                    #- torch.log(torch.sqrt(2 * torch.as_tensor(math.pi)))*k/2 #it's very small and dominates -  a constant for fixed dimensions
+                )
+                ret.logprobs.append(log_prob)
+            ret.latents.append(sample)
+            
+
+        return sample, t_seq, ret["latents"], ret["logprobs"]
+    
+    def sample_onestep_logprob(
+        self,
+        model,
+        cond,
+        x_t,
+        x_t_prev,
+        t,
+        t_prev,
+        eta,
+        **kwargs):
+        # we still use the prior sample trajectory, but now the mean is updated because
+        # model is updated!
+
+        out = self.sample_once_with_grad(model, x_t, t, t_prev, cond, **kwargs)
+        new_pred_mean = out.pred_x_prev
+
+        # use corresponding ddpm noise schedule
+        alpha_t_sqr = 1/(1+t**2)
+        alpha_t_prev_sqr = 1/(1+t_prev**2)
+        sigma_sqr = (1-alpha_t_prev_sqr)/(1-alpha_t_sqr)*(1-alpha_t_sqr/alpha_t_prev_sqr) * eta
+
+        k = x_t_prev.feats.view(-1).shape[0]
+
+        # calculate log probs by using mean=out.pred_x_prev, var=sigma_sqr
+        # data is the sparse version, seems like some computation (e.g. spconv)
+        # happens with the sparse data and some happen directly on feats
+
+        # so we include both in the log prob (even though the numerical results are
+        # identical, to be able to upgrade gradients on both
+        diff_data = x_t_prev.detach().data.features - new_pred_mean.data.features
+        diff_feats = x_t_prev.detach().feats - new_pred_mean.feats
+        diff = (diff_data+diff_feats)/2
+
+        log_prob = (
+            -(diff ** 2).sum() / (2 * sigma_sqr)
+            - torch.log(sigma_sqr**0.5)
+            #- torch.log(torch.sqrt(2 * torch.as_tensor(math.pi)))*k/2
+        )
+        return log_prob
 
 
 class FlowEulerCfgSampler(ClassifierFreeGuidanceSamplerMixin, FlowEulerSampler):

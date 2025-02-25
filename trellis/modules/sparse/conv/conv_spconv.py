@@ -35,7 +35,7 @@ class SparseConv3d(nn.Module):
             sorted_coords = new_data.indices[fwd]
             unsorted_data = new_data
             new_data = spconv.SparseConvTensor(sorted_feats, sorted_coords, unsorted_data.spatial_shape, unsorted_data.batch_size)  # type: ignore
-
+        
         out = SparseTensor(
             new_data, shape=torch.Size(new_shape), layout=new_layout,
             scale=tuple([s * stride for s, stride in zip(x._scale, self.stride)]),
@@ -68,7 +68,6 @@ class SparseInverseConv3d(nn.Module):
                 assert torch.equal(data.indices, x.coords[bwd]), 'Recover the original order failed'
         else:
             data = x.data
-
         new_data = self.conv(data)
         new_shape = [x.shape[0], self.conv.out_channels]
         new_layout = None if spatial_changed else x.layout

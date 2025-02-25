@@ -8,30 +8,30 @@ import imageio
 from PIL import Image
 from trellis.pipelines import TrellisImageTo3DPipeline
 from trellis.utils import render_utils, postprocessing_utils
-
+import torch
 # Load a pipeline from a model folder or a Hugging Face model hub.
 
 pipeline = TrellisImageTo3DPipeline.from_pretrained("JeffreyXiang/TRELLIS-image-large")
 pipeline.cuda()
 
 # Load an image
-name = "block"
+name = "block_edit"
 image = Image.open(f"assets/example_image/yellow_block.jpg")
 
 # Run the pipeline
-outputs = pipeline.run(
-    image,
-    seed=1,
-    # Optional parameters
-    # sparse_structure_sampler_params={
-    #     "steps": 12,
-    #     "cfg_strength": 7.5,
-    # },
-    # slat_sampler_params={
-    #     "steps": 12,
-    #     "cfg_strength": 3,
-    # },
-)
+lr = 8e-5
+n_epochs = 10
+n_inner_epochs=60
+
+#torch.autograd.set_detect_anomaly(True)
+outputs = pipeline.train_slat_with_reward(
+        n_epochs=n_epochs,
+        n_inner_train_epochs=n_inner_epochs,
+        lr=lr,
+        edit_prompt="the image of a purple cube",
+        image=image,
+        seed=123
+        )
 # outputs is a dictionary containing generated 3D assets in different formats:
 # - outputs['gaussian']: a list of 3D Gaussians
 # - outputs['radiance_field']: a list of radiance fields
@@ -39,11 +39,11 @@ outputs = pipeline.run(
 
 # Render the outputs
 video = render_utils.render_video(outputs['gaussian'][0])['color']
-imageio.mimsave(f"out/{name}_gs.mp4", video, fps=30)
+imageio.mimsave(f"out/ddpo/{name}_gs.mp4", video, fps=30)
 video = render_utils.render_video(outputs['radiance_field'][0])['color']
-imageio.mimsave(f"out/{name}_rf.mp4", video, fps=30)
+imageio.mimsave(f"out/ddpo/{name}_rf.mp4", video, fps=30)
 video = render_utils.render_video(outputs['mesh'][0])['normal']
-imageio.mimsave(f"out/{name}_mesh.mp4", video, fps=30)
+imageio.mimsave(f"out/ddpo/{name}_mesh.mp4", video, fps=30)
 
 # GLB files can be extracted from the outputs
 '''

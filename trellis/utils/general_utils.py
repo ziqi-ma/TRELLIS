@@ -1,7 +1,7 @@
 import numpy as np
 import cv2
 import torch
-
+import plotly.graph_objects as go
 
 # Dictionary utils
 def _dict_merge(dicta, dictb, prefix=''):
@@ -185,3 +185,39 @@ def indent(s, n=4):
         lines[i] = ' ' * n + lines[i]
     return '\n'.join(lines)
 
+
+def visualize_pts(points, colors, save_path=None, save_rendered_path=None):
+
+    if save_path:
+        np.save(f"{save_path}xyz.npy", points.cpu().numpy())
+        np.save(f"{save_path}rgb.npy", colors.cpu().numpy())
+    
+    points = points.cpu().numpy()
+    fig = go.Figure(data=[go.Scatter3d(
+        x=points[:, 0],
+        y=points[:, 1],
+        z=points[:, 2],
+        mode='markers',
+        marker=dict(
+            size=1.5,
+            color=(colors.cpu().numpy()*255).astype(int),  # Use RGB colors
+            opacity=0.5
+        ))])
+    fig.update_layout(
+        scene=dict(
+            bgcolor='rgb(220, 220, 220)'  #bgcolor='rgb(255, 255, 255)'# Set the 3D scene background to light grey
+        ),
+        paper_bgcolor='rgb(220, 220, 220)' #paper_bgcolor='rgb(255, 255, 255)'## Set the overall figure background to light grey
+    )
+    fig.update_layout(
+        scene_camera=dict(
+            up=dict(x=0, y=0, z=1),  # Adjust these values for your point cloud
+            eye=dict(x=0, y=0, z=1.5),  # Increase the values to move further away
+            center = dict(x=0,y=0,z=0)
+        )
+    )
+    
+    if save_rendered_path:
+        fig.write_image(save_rendered_path)
+    else:
+        fig.show()

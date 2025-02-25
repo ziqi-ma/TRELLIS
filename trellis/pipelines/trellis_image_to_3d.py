@@ -14,7 +14,56 @@ from . import samplers
 from ..modules import sparse as sp
 from torch.nn.utils.rnn import pad_sequence
 from ..representations import Gaussian, Strivec, MeshExtractResult
-from ...control.masactrl import MutualSelfAttentionControl, register_attention_editor_slat_flow
+from control.masactrl import MutualSelfAttentionControl, MutualSelfAttentionControlSparse, register_attention_editor_structure_gen, register_attention_editor_slat_flow
+import random
+import os
+from trellis.utils.general_utils import visualize_pts
+import torch.optim as optim
+import torch
+import clip
+import numpy as np
+from PIL import Image
+from trellis.utils import render_utils
+import imageio
+from trellis.modules.norm import LayerNorm32
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    os.environ["PL_GLOBAL_SEED"] = str(seed)
+
+def check_grad(module, grad_input, grad_output):
+    # grad_input and grad_output are tuples
+    # Check if any element is NaN or Inf
+    for idx, g in enumerate(grad_input):
+        if g is not None and torch.isnan(g).any():
+            print(f"NaN in grad_input of {module} at index {idx}")
+            print(grad_input)
+            print(A)
+        if g is not None and torch.isinf(g).any():
+            print(f"Inf in grad_input of {module} at index {idx}")
+            print(grad_input)
+            print(A)
+    for idx, g in enumerate(grad_output):
+        if g is not None and torch.isnan(g).any():
+            print(f"NaN in grad_input of {module} at index {idx}")
+            print(grad_input)
+            print(A)
+        if g is not None and torch.isinf(g).any():
+            print(f"Inf in grad_input of {module} at index {idx}")
+            print(grad_input)
+            print(A)
+
+def check_forward(module, input, output):
+    # If it's a SparseTensor, you might need to check output.feats
+    feats = input[0].feats if hasattr(input[0], 'feats') else input[0]
+    if torch.isnan(feats).any() or torch.isinf(feats).any():
+        print(f"NaN/Inf detected in forward input of {module.__class__.__name__}")
+        print(input[0])
+        print(a)
+
+
 
 class TrellisImageTo3DPipeline(Pipeline):
     """
@@ -182,9 +231,80 @@ class TrellisImageTo3DPipeline(Pipeline):
         reso = flow_model.resolution
         noise = torch.randn(num_samples, flow_model.in_channels, reso, reso, reso).to(self.device)
         sampler_params = {**self.sparse_structure_sampler_params, **sampler_params}
-        z_s = self.sparse_structure_sampler.sample(
+        z_s = self.sparse_structure_sampler.sample_noised(
             flow_model,
             noise,
+            **cond,
+            **sampler_params,
+            verbose=True
+        ).samples
+        
+        # Decode occupancy latent
+        decoder = self.models['sparse_structure_decoder']
+        coords = torch.argwhere(decoder(z_s)>0)[:, [0, 2, 3, 4]].int()
+        return coords
+    
+    def sample_sparse_structure_with_logprobs(self, cond, num_samples, sampler_params, eta):
+        """
+        Sample sparse structures with the given conditioning.
+        
+        Args:
+            cond (dict): The conditioning information.
+            num_samples (int): The number of samples to generate.
+            sampler_params (dict): Additional parameters for the sampler.
+        """
+        # Sample occupancy latent
+        flow_model = self.models['sparse_structure_flow_model']
+        reso = flow_model.resolution
+        noise = torch.randn(num_samples, flow_model.in_channels, reso, reso, reso).to(self.device)
+        sampler_params = {**self.sparse_structure_sampler_params, **sampler_params}
+        
+        z_s, timesteps, latents, logprobs = self.sparse_structure_sampler.sample_noised_with_logprobs(
+            flow_model,
+            noise,
+            **cond,
+            eta=eta,
+            **sampler_params,
+            verbose=True
+        )
+        
+        # Decode occupancy latent
+        decoder = self.models['sparse_structure_decoder']
+        coords = torch.argwhere(decoder(z_s)>0)[:, [0, 2, 3, 4]].int()
+        return coords, timesteps, latents, logprobs # timesteps and latents are length n_steps+1, logprobs is length n_steps-1
+    
+    def sample_sparse_structure_consistent(
+        self,
+        cond,
+        starting_step,
+        starting_layer,
+        stop_layer,
+        num_samples: int = 1,
+        sampler_params: dict = {},
+    ) -> torch.Tensor:
+        """
+        Sample sparse structures with the given conditioning.
+        
+        Args:
+            cond (dict): The conditioning information.
+            num_samples (int): The number of samples to generate.
+            sampler_params (dict): Additional parameters for the sampler.
+        """
+        
+        # Sample occupancy latent
+        flow_model = self.models['sparse_structure_flow_model']
+        reso = flow_model.resolution
+
+        noise = torch.randn(num_samples, flow_model.in_channels, reso, reso, reso).to(self.device)
+        stack_noise = torch.cat([noise, noise],dim=0)
+        sampler_params = {**self.sparse_structure_sampler_params, **sampler_params}
+
+        controller = MutualSelfAttentionControl(starting_step, starting_layer, total_layers=stop_layer)
+        register_attention_editor_structure_gen(flow_model, controller)
+
+        z_s = self.sparse_structure_sampler.sample(
+            flow_model,
+            stack_noise,
             **cond,
             **sampler_params,
             verbose=True
@@ -241,7 +361,7 @@ class TrellisImageTo3DPipeline(Pipeline):
             coords=coords,
         )
         sampler_params = {**self.slat_sampler_params, **sampler_params}
-        slat = self.slat_sampler.sample(
+        slat = self.slat_sampler.sample_noised(
             flow_model,
             noise,
             **cond,
@@ -255,6 +375,44 @@ class TrellisImageTo3DPipeline(Pipeline):
         
         return slat
     
+    def sample_slat_with_logprobs(
+        self,
+        cond: dict,
+        coords: torch.Tensor,
+        sampler_params,
+        eta
+    ) -> sp.SparseTensor:
+        """
+        Sample structured latent with the given conditioning.
+        
+        Args:
+            cond (dict): The conditioning information.
+            coords (torch.Tensor): The coordinates of the sparse structure.
+            sampler_params (dict): Additional parameters for the sampler.
+        """
+        # Sample structured latent
+        flow_model = self.models['slat_flow_model']
+        noise = sp.SparseTensor(
+            feats=torch.randn(coords.shape[0], flow_model.in_channels).to(self.device),
+            coords=coords,
+        )
+        sampler_params = {**self.slat_sampler_params, **sampler_params}
+
+        slat, timesteps, latents, logprobs = self.slat_sampler.sample_noised_with_logprobs(
+            flow_model,
+            noise,
+            **cond,
+            eta=eta,
+            **sampler_params,
+            verbose=True
+        )
+
+        std = torch.tensor(self.slat_normalization['std'])[None].to(slat.device)
+        mean = torch.tensor(self.slat_normalization['mean'])[None].to(slat.device)
+        slat = slat * std + mean
+        
+        return slat, timesteps, latents, logprobs
+    
     def sample_slat_consistent(
         self,
         cond0: dict,
@@ -263,6 +421,7 @@ class TrellisImageTo3DPipeline(Pipeline):
         coords1: torch.Tensor,
         starting_step,
         starting_layer,
+        stop_layer,
         sampler_params: dict = {}
     ) -> sp.SparseTensor:
         """
@@ -277,21 +436,22 @@ class TrellisImageTo3DPipeline(Pipeline):
         flow_model = self.models['slat_flow_model']
         
         # pack them in sequence
-        coords1[0,...] = 1
+        coords1[:,0] = 1
         coords = torch.cat([coords0, coords1], dim=0)
 
         # stack conds
         cond_all = {}
         for k in cond0:
-            cond_all[k] = torch.stack([cond0[k], cond1[k]])
+            cond_all[k] = torch.cat([cond0[k], cond1[k]], dim=0)
 
-        # need padding
+        noise_feats = torch.randn(coords.shape[0], flow_model.in_channels).to(self.device)
+
         noise = sp.SparseTensor(
-            feats=torch.randn(coords.shape[0], flow_model.in_channels).to(self.device),
+            feats=noise_feats,
             coords=coords,
         )
 
-        controller = MutualSelfAttentionControl(starting_step, starting_layer)
+        controller = MutualSelfAttentionControlSparse(starting_step, starting_layer, total_layers=stop_layer)
         register_attention_editor_slat_flow(flow_model, controller)
 
         sampler_params = {**self.slat_sampler_params, **sampler_params}
@@ -306,7 +466,50 @@ class TrellisImageTo3DPipeline(Pipeline):
         std = torch.tensor(self.slat_normalization['std'])[None].to(slat.device)
         mean = torch.tensor(self.slat_normalization['mean'])[None].to(slat.device)
         slat = slat * std + mean
+        return slat
+    
+    def sample_slat_consistent(
+        self,
+        cond:dict,
+        coords: torch.Tensor,
+        starting_step,
+        starting_layer,
+        stop_layer,
+        sampler_params: dict = {}
+    ) -> sp.SparseTensor:
+        """
+        Sample structured latent with the given conditioning.
         
+        Args:
+            cond (dict): The conditioning information.
+            coords (torch.Tensor): The coordinates of the sparse structure.
+            sampler_params (dict): Additional parameters for the sampler.
+        """
+        # Sample structured latent
+        flow_model = self.models['slat_flow_model']
+
+        noise_feats = torch.randn(coords.shape[0], flow_model.in_channels).to(self.device)
+
+        noise = sp.SparseTensor(
+            feats=noise_feats,
+            coords=coords,
+        )
+
+        controller = MutualSelfAttentionControlSparse(starting_step, starting_layer, total_layers=stop_layer)
+        register_attention_editor_slat_flow(flow_model, controller)
+
+        sampler_params = {**self.slat_sampler_params, **sampler_params}
+        slat = self.slat_sampler.sample(
+            flow_model,
+            noise,
+            **cond,
+            **sampler_params,
+            verbose=True
+        ).samples
+
+        std = torch.tensor(self.slat_normalization['std'])[None].to(slat.device)
+        mean = torch.tensor(self.slat_normalization['mean'])[None].to(slat.device)
+        slat = slat * std + mean
         return slat
 
     @torch.no_grad()
@@ -338,10 +541,14 @@ class TrellisImageTo3DPipeline(Pipeline):
         slat = self.sample_slat(cond, coords, slat_sampler_params)
         return self.decode_slat(slat, formats)
     
+
     @torch.no_grad()
-    def run_consistent(
+    def run_consistent_tolatnet(
         self,
         images: List[Image.Image],
+        starting_step,
+        starting_layer, 
+        stop_layer,
         num_samples: int = 1,
         seed: int = 42,
         sparse_structure_sampler_params: dict = {},
@@ -359,14 +566,67 @@ class TrellisImageTo3DPipeline(Pipeline):
             slat_sampler_params (dict): Additional parameters for the structured latent sampler.
             preprocess_image (bool): Whether to preprocess the image.
         """
+
         if preprocess_image:
             images = [self.preprocess_image(image) for image in images]
         cond0 = self.get_cond([images[0]])
-        cond1 = self.get_cond([images[0]])
-        torch.manual_seed(seed)
+        cond1 = self.get_cond([images[1]])
+        
+        set_seed(seed)
         coords0 = self.sample_sparse_structure(cond0, num_samples, sparse_structure_sampler_params)
+        set_seed(seed)
         coords1 = self.sample_sparse_structure(cond1, num_samples, sparse_structure_sampler_params)
-        slat = self.sample_slat_consistent(cond0, cond1, coords0, coords1, slat_sampler_params)
+        set_seed(seed)
+        slat = self.sample_slat_consistent(cond0, cond1, coords0, coords1, starting_step, starting_layer, stop_layer, slat_sampler_params)
+
+        return self.decode_slat(slat, formats)
+    
+
+    @torch.no_grad()
+    def run_consistent_all(
+        self,
+        images: List[Image.Image],
+        starting_step_ss,
+        starting_layer_ss, 
+        stop_layer_ss,
+        starting_step_l,
+        starting_layer_l, 
+        stop_layer_l,
+        num_samples: int = 1,
+        seed: int = 42,
+        sparse_structure_sampler_params: dict = {},
+        slat_sampler_params: dict = {},
+        formats: List[str] = ['mesh', 'gaussian', 'radiance_field'],
+        preprocess_image: bool = True,
+    ) -> dict:
+        """
+        Run the pipeline.
+
+        Args:
+            image (Image.Image): The image prompt.
+            num_samples (int): The number of samples to generate.
+            sparse_structure_sampler_params (dict): Additional parameters for the sparse structure sampler.
+            slat_sampler_params (dict): Additional parameters for the structured latent sampler.
+            preprocess_image (bool): Whether to preprocess the image.
+        """
+
+        if preprocess_image:
+            images = [self.preprocess_image(image) for image in images]
+        cond0 = self.get_cond([images[0]])
+        cond1 = self.get_cond([images[1]])
+         # stack conds
+        cond_all = {}
+        for k in cond0:
+            cond_all[k] = torch.cat([cond0[k], cond1[k]], dim=0)
+        
+        set_seed(seed)
+        coords = self.sample_sparse_structure_consistent(
+            cond_all, starting_step_ss, starting_layer_ss, stop_layer_ss, **sparse_structure_sampler_params)
+        
+        visualize_pts(coords[coords[:,0]==0][:,1:], torch.zeros(coords[coords[:,0]==0][:,1:].shape))
+        visualize_pts(coords[coords[:,0]==1][:,1:], torch.zeros(coords[coords[:,1]==0][:,1:].shape))
+        
+        slat = self.sample_slat_consistent(cond_all, coords, starting_step_l, starting_layer_l, stop_layer_l, slat_sampler_params)
         return self.decode_slat(slat, formats)
 
     @contextmanager
@@ -460,3 +720,439 @@ class TrellisImageTo3DPipeline(Pipeline):
         with self.inject_sampler_multi_image('slat_sampler', len(images), slat_steps, mode=mode):
             slat = self.sample_slat(cond, coords, slat_sampler_params)
         return self.decode_slat(slat, formats)
+    
+    @torch.no_grad()
+    def run_with_ss_logprobs(
+        self,
+        cond,
+        eta,
+        num_samples: int = 1,
+        seed: int = 42,
+        sparse_structure_sampler_params: dict = {},
+        slat_sampler_params: dict = {},
+        formats: List[str] = ['mesh', 'gaussian', 'radiance_field']
+    ) -> dict:
+        """
+        Run the pipeline.
+
+        Args:
+            image (Image.Image): The image prompt.
+            num_samples (int): The number of samples to generate.
+            sparse_structure_sampler_params (dict): Additional parameters for the sparse structure sampler.
+            slat_sampler_params (dict): Additional parameters for the structured latent sampler.
+            preprocess_image (bool): Whether to preprocess the image.
+        """
+        
+        torch.manual_seed(seed)
+        coords, ss_timesteps, ss_latents, ss_logprobs = self.sample_sparse_structure_with_logprobs(cond, num_samples, sparse_structure_sampler_params, eta)
+        slat = self.sample_slat(cond, coords, slat_sampler_params)
+        res = self.decode_slat(slat, formats)
+        return res, ss_timesteps, ss_latents, ss_logprobs
+    
+    @torch.no_grad()
+    def run_with_slat_logprobs(
+        self,
+        cond,
+        eta,
+        num_samples: int = 1,
+        seed: int = 42,
+        sparse_structure_sampler_params: dict = {},
+        slat_sampler_params: dict = {},
+        formats: List[str] = ['mesh', 'gaussian', 'radiance_field']
+    ) -> dict:
+        """
+        Run the pipeline.
+
+        Args:
+            image (Image.Image): The image prompt.
+            num_samples (int): The number of samples to generate.
+            sparse_structure_sampler_params (dict): Additional parameters for the sparse structure sampler.
+            slat_sampler_params (dict): Additional parameters for the structured latent sampler.
+            preprocess_image (bool): Whether to preprocess the image.
+        """
+        
+        torch.manual_seed(seed)
+        coords = self.sample_sparse_structure(cond, num_samples, sparse_structure_sampler_params)
+        slat, slat_timesteps, slat_latents, slat_logprobs = self.sample_slat_with_logprobs(cond, coords, slat_sampler_params, eta)
+        res = self.decode_slat(slat, formats)
+        return res, slat_timesteps, slat_latents, slat_logprobs
+    
+    @torch.no_grad()
+    def get_reward_slat_text(self, slat_out, edit_prompt):
+        # for now only use gaussian
+        # and use CLIP similarity
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model, preprocess = clip.load("ViT-B/32", device=device)
+        views = render_utils.render_video(slat_out['gaussian'][0])['color'] # this is list of numpys
+        img_input = [preprocess(Image.fromarray(img)).unsqueeze(0).to(device) for img in views]
+        img_input = torch.cat(img_input)
+        text_input = clip.tokenize([edit_prompt]).to(device)
+        image_features = model.encode_image(img_input)
+        text_features = model.encode_text(text_input)
+        image_features = image_features / image_features.norm(dim=-1, keepdim=True) # k, dim
+        text_features = text_features / text_features.norm(dim=-1, keepdim=True) # 1,dim
+        similarity_score = (image_features @ text_features.T).cpu().numpy() # k,1
+        mean_score = similarity_score.mean()
+        return mean_score
+
+    def train_ss_gen_with_reward(
+        self,
+        n_epochs: int, # n_epochs is how many times to sample noise and get "old" path and reward
+        n_inner_train_epochs: int, #n_inner_train_epochs is how many times to update the model parameter - we essentially reuse the sample trajectory and only update model weights so log_prob will change
+        lr,
+        edit_prompt: str,
+        image: Image.Image,
+        seed: int = 42,
+        sparse_structure_sampler_params: dict = {},
+        slat_sampler_params: dict = {},
+        formats: List[str] = ['mesh', 'gaussian', 'radiance_field'],
+        preprocess_image: bool = True,
+        adv_clip_max = 5,
+        clip_range = 1e-4,
+        eta=0.2
+        ):
+
+        optimizer = optim.Adam(self.models['sparse_structure_flow_model'].parameters(), lr=lr)
+        
+        for epoch in range(n_epochs):
+            
+            if preprocess_image:
+                image = self.preprocess_image(image)
+            cond = self.get_cond([image])
+
+            #################### SAMPLING ####################
+            self.models['sparse_structure_flow_model'].eval()
+
+            samples = []
+            # for now, we just have a single sample
+            # EXTENSION: possible to change this to sampling multiple noises
+            # ss latents should include the initial noise so size of time_steps+1!
+            # so is ss_timesteps
+            slat_out, ss_timesteps, ss_latents, ss_log_probs = self.run_with_ss_logprobs(
+                cond,
+                seed = seed + epoch,
+                sparse_structure_sampler_params=sparse_structure_sampler_params,
+                slat_sampler_params = slat_sampler_params,
+                formats = formats)
+            # log_probs should be a list of size n_timesteps-1
+            # latents and timesteps should be a list of size n_timesteps+1
+            
+            ss_latents = torch.stack(ss_latents) # (num_steps+1, dim_latent)
+            ss_log_probs = torch.stack(ss_log_probs) # (num_steps-1,)
+            ss_timesteps = torch.stack(ss_timesteps) # (num_steps+1,)
+                
+            rewards = self.get_reward_slat_text(slat_out, edit_prompt) # a number
+
+            samples.append(
+                {
+                    "ss_timesteps": ss_timesteps,
+                    "ss_latents": ss_latents[:-1],  # each entry is the latent before timestep t
+                    "ss_next_latents": ss_latents[1:],  # each entry is the latent after timestep t
+                    "log_probs": ss_log_probs,
+                    "rewards": rewards,
+                }
+            )
+
+            samples = {k: torch.cat([s[k] for s in samples]) for k in samples[0].keys()}
+
+            # TODO: right now we only have one reward, cannot do mean and std
+            advantages  = rewards
+            #advantages = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
+
+            bs, num_timesteps = samples["timesteps"].shape # bs = 1 as of now
+            num_timesteps -= 1
+            print(bs)
+            print(num_timesteps)
+
+            #################### TRAINING ####################
+            for inner_epoch in range(n_inner_train_epochs):
+                # TODO: shuffle along batch dim if applicable, rn our bs =1
+
+                # dict of lists -> list of dicts for easier iteration
+                samples_batched = [
+                    dict(zip(samples, x)) for x in zip(*samples.values())
+                ]
+                print(samples_batched)
+
+                # train
+                self.models['sparse_structure_flow_model'].train()
+
+                #info = defaultdict(list)
+                for i, sample in tqdm(
+                    list(enumerate(samples_batched)),
+                    desc=f"Epoch {epoch}.{inner_epoch}: training"
+                ):
+
+                    for j in tqdm(
+                        range(num_timesteps-1),
+                        desc="Timestep"
+                    ):
+                        
+                        ss_log_prob = self.sparse_structure_sampler.sample_onestep_logprob(
+                            self.models['sparse_structure_flow_model'],
+                            cond,
+                            x_t = sample["latents"][:, j],
+                            x_t_prev = sample["next_latents"][:, j],
+                            t = sample["timesteps"][j],
+                            t_prev =  sample["timesteps"][j+1],
+                            eta = eta,
+                            **sparse_structure_sampler_params)
+
+                        # this needs to first predict noise then get logprob ddim
+                        # look at ddim_step_with_logprob implementation, prob needs to carry 
+                        # gradient of model
+                    
+                        # ppo logic
+                        advantages = torch.clamp(
+                            sample["advantages"],
+                            -adv_clip_max,
+                            adv_clip_max,
+                        )
+
+                        ratio = torch.exp(ss_log_prob - sample["log_probs"][:, j])
+                        print(ratio)
+                        unclipped_loss = -advantages * ratio
+                        print(unclipped_loss)
+                        clipped_loss = -advantages * torch.clamp(
+                            ratio,
+                            1.0 - clip_range,
+                            1.0 + clip_range,
+                        )
+                        print(clipped_loss)
+                        loss = torch.mean(torch.maximum(unclipped_loss, clipped_loss))
+                        
+                        '''
+                        # debugging values
+                        # John Schulman says that (ratio - 1) - log(ratio) is a better
+                        # estimator, but most existing code uses this so...
+                        # http://joschu.net/blog/kl-approx.html
+                        info["approx_kl"].append(
+                            0.5
+                            * torch.mean((log_prob - sample["log_probs"][:, j]) ** 2)
+                        )
+                        info["clipfrac"].append(
+                            torch.mean(
+                                (
+                                    torch.abs(ratio - 1.0) > config.train.clip_range
+                                ).float()
+                            )
+                        )
+                        info["loss"].append(loss)
+                        '''
+
+                        # backward pass
+                        loss.backward()
+                        optimizer.step()
+                        optimizer.zero_grad()
+        # save weight
+        torch.save(self.models['sparse_structure_flow_model'], '/data/ziqi/training_checkpts/trellisrl/ss_gen_weights.pth')
+        
+        # perform rendering with a normal run now
+        outputs = self.run(image,seed=seed)
+        
+        # Render the outputs
+        video = render_utils.render_video(outputs['gaussian'][0])['color']
+        imageio.mimsave(f"out/new_gs.mp4", video, fps=30)
+        return
+    
+    def train_slat_with_reward(
+        self,
+        n_epochs: int, # n_epochs is how many times to sample noise and get "old" path and reward
+        n_inner_train_epochs: int, #n_inner_train_epochs is how many times to update the model parameter - we essentially reuse the sample trajectory and only update model weights so log_prob will change
+        lr,
+        edit_prompt: str,
+        image: Image.Image,
+        seed: int = 42,
+        sparse_structure_sampler_params: dict = {},
+        slat_sampler_params: dict = {},
+        formats: List[str] = ['mesh', 'gaussian', 'radiance_field'],
+        preprocess_image: bool = True,
+        adv_clip_max = 5,
+        clip_range = 1e-4,
+        eta=0.2
+        ):
+
+        self.models["slat_flow_model"] = self.models["slat_flow_model"].float()
+        self.models["slat_flow_model"].convert_to_fp32()
+        self.models["slat_flow_model"].dtype=torch.float32
+        # this is causing so many issues!!!
+
+        optimizer = optim.Adam(self.models["slat_flow_model"].parameters(), lr=lr)
+        
+        for epoch in range(n_epochs):
+            
+            if preprocess_image:
+                image = self.preprocess_image(image)
+            cond = self.get_cond([image])
+
+            #################### SAMPLING ####################
+            self.models["slat_flow_model"].eval()
+            
+
+            samples = []
+            # for now, we just have a single sample
+            # EXTENSION: possible to change this to sampling multiple noises
+            # ss latents should include the initial noise so size of time_steps+1!
+            # so is ss_timesteps
+            slat_out, slat_timesteps, slat_latents, slat_log_probs = self.run_with_slat_logprobs(
+                cond,
+                eta=eta,
+                seed = seed,
+                sparse_structure_sampler_params=sparse_structure_sampler_params,
+                slat_sampler_params = slat_sampler_params,
+                formats = formats)
+            # log_probs should be a list of size n_timesteps-1
+            # latents and timesteps should be a list of size n_timesteps+1
+            
+            slat_log_probs = torch.stack(slat_log_probs) # (num_steps-1,)
+            slat_timesteps = torch.tensor(np.array(slat_timesteps)) # (num_steps+1,)
+                
+            rewards = self.get_reward_slat_text(slat_out, edit_prompt) # a number
+            print(f"reward: {rewards}")
+            # write to reward
+            with open('out/sample10/rewards', 'a') as file:
+                file.write(f"{rewards}\n")
+            
+
+            samples.append(
+                {
+                    #"cond": cond['cond'], EXTENSION: when doing multiple samples, need to pass in cond
+                    "timesteps": slat_timesteps,
+                    "latents": slat_latents[:-1],  # list of SparseTensor, each entry is the latent before timestep t
+                    "next_latents": slat_latents[1:],  # list of SparseTensor,each entry is the latent after timestep t
+                    "log_probs": slat_log_probs,
+                    "advantages": torch.tensor([rewards]), # one sample, no mean and std to work with
+                }
+            )
+
+            #samples = {k: torch.cat([s[k] for s in samples]) for k in samples[0].keys()} EXTENSION: do this when you have a batch
+
+            # TODO: right now we only have one reward, cannot do mean and std
+            advantages  = rewards
+            #advantages = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
+
+            num_timesteps = samples[0]["timesteps"].shape[0] # bs = 1 as of now EXTENSION this will be bs,num_steps
+            num_timesteps -= 1
+
+            #################### TRAINING ####################
+
+            # train
+            self.models['slat_flow_model'].train()
+            for name, module in self.models["slat_flow_model"].named_modules():
+                # Register a hook on each module
+                module.register_full_backward_hook(check_grad)
+                if isinstance(module, LayerNorm32):
+                    module.register_forward_hook(check_forward)
+
+            for name, param in self.models['slat_flow_model'].named_parameters():
+                def check_param_grad(grad, param_name=name):
+                    if torch.isnan(grad).any() or torch.isinf(grad).any():
+                        print(f"NaN/Inf in param {param_name} grad")
+                    return grad  # Must return the grad to avoid modifying it
+
+                if param.requires_grad:
+                    param.register_hook(check_param_grad)
+        
+            onestep_sampler_params = {**self.slat_sampler_params, **slat_sampler_params}
+            del onestep_sampler_params['steps']
+            del onestep_sampler_params['rescale_t']
+            #delete steps because below we only use it for one step
+            for inner_epoch in range(n_inner_train_epochs):
+                # TODO: shuffle along batch dim if applicable, rn our bs =1
+
+                # dict of lists -> list of dicts for easier iteration
+                #samples_batched = [
+                    #dict(zip(samples, x)) for x in zip(*samples.values())
+                #] EXTENSION: do this when batching multiple samples
+                samples_batched = samples
+
+                #info = defaultdict(list)
+                for i, sample in tqdm(
+                    list(enumerate(samples_batched)),
+                    desc=f"Epoch {epoch}.{inner_epoch}: training"
+                ):
+
+                    for j in tqdm(
+                        np.arange(0,num_timesteps-1,10),#range(num_timesteps-1),
+                        desc="Timestep"
+                    ):
+                        
+                        slat_log_prob = self.slat_sampler.sample_onestep_logprob(
+                            self.models['slat_flow_model'],
+                            x_t = sample["latents"][j], # EXTENSION, :,j so first dim is batch
+                            x_t_prev = sample["next_latents"][j], # EXTENSION, :,j so first dim is batch
+                            t = sample["timesteps"][j],
+                            t_prev =  sample["timesteps"][j+1],
+                            eta = eta,
+                            **cond, # EXTENSION: When doing multiple samples, need to take samples['cond']
+                            **onestep_sampler_params)
+
+                        # this needs to first predict noise then get logprob ddim
+                        # look at ddim_step_with_logprob implementation, prob needs to carry 
+                        # gradient of model
+                    
+                        # ppo logic
+                        advantages = torch.clamp(
+                            sample["advantages"],
+                            -adv_clip_max,
+                            adv_clip_max,
+                        )
+
+                        ratio = torch.exp(slat_log_prob - sample["log_probs"][j]).cpu() # EXTENSION, :,j so first dim is batch
+                        unclipped_loss = -advantages * ratio
+                        clipped_loss = -advantages * torch.clamp(
+                            ratio,
+                            1.0 - clip_range,
+                            1.0 + clip_range,
+                        )
+                       
+                        loss = torch.mean(torch.maximum(unclipped_loss, clipped_loss))
+                        
+                        '''
+                        # debugging values
+                        # John Schulman says that (ratio - 1) - log(ratio) is a better
+                        # estimator, but most existing code uses this so...
+                        # http://joschu.net/blog/kl-approx.html
+                        info["approx_kl"].append(
+                            0.5
+                            * torch.mean((log_prob - sample["log_probs"][:, j]) ** 2)
+                        )
+                        info["clipfrac"].append(
+                            torch.mean(
+                                (
+                                    torch.abs(ratio - 1.0) > config.train.clip_range
+                                ).float()
+                            )
+                        )
+                        info["loss"].append(loss)
+                        '''
+                        loss.backward()
+
+                        # backward pass
+                        optimizer.step()
+                        optimizer.zero_grad()
+
+                if i % 5 == 0:
+                    self.models['slat_flow_model'].eval()
+                    outputs = self.run(image,seed=seed)
+                    # Render the outputs
+                    video = render_utils.render_video(outputs['gaussian'][0])['color']
+                    imageio.mimsave(f"out/sample10/epoch{epoch}.{i}_10new_gs_reward.mp4", video, fps=30)
+                    rewards = self.get_reward_slat_text(slat_out, edit_prompt) # a number
+                    print(f"reward: {rewards}")
+                    # write to reward
+                    with open('out/sample10/rewards', 'a') as file:
+                        file.write(f"{rewards}\n")
+                    self.models['slat_flow_model'].train()
+
+        # save weight
+        torch.save(self.models['slat_flow_model'], '/data/ziqi/training_checkpts/trellisrl/slat_weights.pth')
+        
+        # perform rendering with a normal run now
+        outputs = self.run(image,seed=seed)
+        
+        # Render the outputs
+        video = render_utils.render_video(outputs['gaussian'][0])['color']
+        imageio.mimsave(f"outnew_gs.mp4", video, fps=30)
+        return
+    
