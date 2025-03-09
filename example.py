@@ -15,13 +15,13 @@ pipeline = TrellisImageTo3DPipeline.from_pretrained("JeffreyXiang/TRELLIS-image-
 pipeline.cuda()
 
 # Load an image
-name = "block"
-image = Image.open(f"assets/example_image/yellow_block.jpg")
+name = "corgi"
+image = Image.open(f"assets/wild/corgi.jpg")
 
 # Run the pipeline
 outputs = pipeline.run(
     image,
-    seed=1,
+    seed=5,
     # Optional parameters
     # sparse_structure_sampler_params={
     #     "steps": 12,
@@ -40,13 +40,13 @@ outputs = pipeline.run(
 # Render the outputs
 video = render_utils.render_video(outputs['gaussian'][0])['color']
 imageio.mimsave(f"out/{name}_gs.mp4", video, fps=30)
-video = render_utils.render_video(outputs['radiance_field'][0])['color']
-imageio.mimsave(f"out/{name}_rf.mp4", video, fps=30)
+#video = render_utils.render_video(outputs['radiance_field'][0])['color']
+#imageio.mimsave(f"out/{name}_rf.mp4", video, fps=30)
 video = render_utils.render_video(outputs['mesh'][0])['normal']
 imageio.mimsave(f"out/{name}_mesh.mp4", video, fps=30)
 
 # GLB files can be extracted from the outputs
-'''
+
 glb = postprocessing_utils.to_glb(
     outputs['gaussian'][0],
     outputs['mesh'][0],
@@ -55,6 +55,6 @@ glb = postprocessing_utils.to_glb(
     texture_size=1024,      # Size of the texture used for the GLB
 )
 glb.export(f"out/{name}.glb")
-'''
+
 # Save Gaussians as PLY files
 #outputs['gaussian'][0].save_ply("sample.ply")

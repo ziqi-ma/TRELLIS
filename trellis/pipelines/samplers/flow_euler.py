@@ -53,6 +53,7 @@ class FlowEulerSampler(Sampler):
         t: float,
         t_prev: float,
         cond: Optional[Any] = None,
+        sigma_sqr = 0,
         **kwargs
     ):
         """
@@ -72,7 +73,7 @@ class FlowEulerSampler(Sampler):
             - 'pred_x_0': a prediction of x_0.
         """
         pred_x_0, pred_eps, pred_v = self._get_model_prediction(model, x_t, t, cond, **kwargs)
-        pred_x_prev = x_t - (t - t_prev) * pred_v
+        pred_x_prev = x_t - (t - math.sqrt((t_prev)**2-sigma_sqr)) * pred_v
         return edict({"pred_x_prev": pred_x_prev, "pred_x_0": pred_x_0})
     
     def sample_once_with_grad(
@@ -82,6 +83,7 @@ class FlowEulerSampler(Sampler):
         t: float,
         t_prev: float,
         cond: Optional[Any] = None,
+        sigma_sqr=0,
         **kwargs
     ):
         """
@@ -101,7 +103,7 @@ class FlowEulerSampler(Sampler):
             - 'pred_x_0': a prediction of x_0.
         """
         pred_x_0, pred_eps, pred_v = self._get_model_prediction(model, x_t, t, cond, **kwargs)
-        pred_x_prev = x_t - (t - t_prev) * pred_v
+        pred_x_prev = x_t - (t - math.sqrt((t_prev)**2-sigma_sqr)) * pred_v
         return edict({"pred_x_prev": pred_x_prev, "pred_x_0": pred_x_0})
 
     @torch.no_grad()
@@ -183,19 +185,17 @@ class FlowEulerSampler(Sampler):
         t_pairs = list((t_seq[i], t_seq[i + 1]) for i in range(steps))
         ret = edict({"samples": None, "pred_x_t": [], "pred_x_0": []})
         for t, t_prev in tqdm(t_pairs, desc="Sampling", disable=not verbose):
-            out = self.sample_once(model, sample, t, t_prev, cond, **kwargs)
+            alpha_t_sqr = 1/(1+t**2)
+            alpha_t_prev_sqr = 1/(1+t_prev**2)
+            sigma_sqr = (1-alpha_t_prev_sqr)/(1-alpha_t_sqr)*(1-alpha_t_sqr/alpha_t_prev_sqr) /5
+            if not torch.is_tensor(sigma_sqr):
+                sigma_sqr = sigma_sqr.astype(float)
+            out = self.sample_once(model, sample, t, t_prev, cond, sigma_sqr=sigma_sqr, **kwargs)
             sample = out.pred_x_prev
             if t_prev > 0:
-                # add noise
-                alpha_t_sqr = 1/(1+t**2)
-                alpha_t_prev_sqr = 1/(1+t_prev**2)
-                #var_diff = (alpha_t_prev1_sqr - alpha_t_prev2_sqr)/50
-                sigma_sqr = (1-alpha_t_prev_sqr)/(1-alpha_t_sqr)*(1-alpha_t_sqr/alpha_t_prev_sqr) /5
-
                 # draw gaussian noise
                 eps = torch.randn(sample.shape).to(sample.device)
                 sample = sample + sigma_sqr**0.5 * eps
-
 
             ret.pred_x_t.append(out.pred_x_prev)
             ret.pred_x_0.append(out.pred_x_0)
@@ -233,22 +233,20 @@ class FlowEulerSampler(Sampler):
             - 'pred_x_0': a list of prediction of x_0.
         """
         sample = noise
-        steps = 100
         t_seq = np.linspace(1, 0, steps + 1)
         
         t_seq = rescale_t * t_seq / (1 + (rescale_t - 1) * t_seq)
         t_pairs = list((t_seq[i], t_seq[i + 1]) for i in range(steps))
         ret = edict({"samples": None, "latents": [sample], "logprobs":[]})
         for t, t_prev in tqdm(t_pairs, desc="Sampling", disable=not verbose):
-            out = self.sample_once(model, sample, t, t_prev, cond, **kwargs)
+            alpha_t_sqr = 1/(1+t**2)
+            alpha_t_prev_sqr = 1/(1+t_prev**2)
+            sigma_sqr = (1-alpha_t_prev_sqr)/(1-alpha_t_sqr)*(1-alpha_t_sqr/alpha_t_prev_sqr) /5
+            if not torch.is_tensor(sigma_sqr):
+                sigma_sqr = sigma_sqr.astype(float)
+            out = self.sample_once(model, sample, t, t_prev, cond, sigma_sqr=sigma_sqr, **kwargs)
             sample = out.pred_x_prev
             if t_prev > 0:
-                # add noise
-                alpha_t_sqr = 1/(1+t**2)
-                alpha_t_prev_sqr = 1/(1+t_prev**2)
-                sigma_sqr = (1-alpha_t_prev_sqr)/(1-alpha_t_sqr)*(1-alpha_t_sqr/alpha_t_prev_sqr) *eta
-                sigma_sqr = torch.tensor(sigma_sqr)
-
                 # draw gaussian noise
                 k = sample.feats.view(-1).shape[0]
                 eps = torch.randn(sample.feats.shape).to(sample.device)/(k**0.5)
@@ -257,7 +255,7 @@ class FlowEulerSampler(Sampler):
                 # calculate log probs by using mean=out.pred_x_prev, var=sigma_sqr
                 log_prob = (
                     -((sample.detach().feats - out.pred_x_prev.feats) ** 2).sum() / (2 * sigma_sqr)
-                    - torch.log(sigma_sqr**0.5)
+                    - math.log(sigma_sqr**0.5)
                     #- torch.log(torch.sqrt(2 * torch.as_tensor(math.pi)))*k/2 #it's very small and dominates -  a constant for fixed dimensions
                 )
                 ret.logprobs.append(log_prob)
@@ -278,15 +276,17 @@ class FlowEulerSampler(Sampler):
         **kwargs):
         # we still use the prior sample trajectory, but now the mean is updated because
         # model is updated!
-
-        out = self.sample_once_with_grad(model, x_t, t, t_prev, cond, **kwargs)
-        new_pred_mean = out.pred_x_prev
-
         # use corresponding ddpm noise schedule
         alpha_t_sqr = 1/(1+t**2)
         alpha_t_prev_sqr = 1/(1+t_prev**2)
         sigma_sqr = (1-alpha_t_prev_sqr)/(1-alpha_t_sqr)*(1-alpha_t_sqr/alpha_t_prev_sqr) * eta
+        if not torch.is_tensor(sigma_sqr):
+            sigma_sqr = sigma_sqr.astype(float)
 
+        out = self.sample_once_with_grad(model, x_t, t, t_prev, cond, sigma_sqr = sigma_sqr, **kwargs)
+        new_pred_mean = out.pred_x_prev
+
+        
         k = x_t_prev.feats.view(-1).shape[0]
 
         # calculate log probs by using mean=out.pred_x_prev, var=sigma_sqr
@@ -301,7 +301,7 @@ class FlowEulerSampler(Sampler):
 
         log_prob = (
             -(diff ** 2).sum() / (2 * sigma_sqr)
-            - torch.log(sigma_sqr**0.5)
+            - math.log(sigma_sqr**0.5)
             #- torch.log(torch.sqrt(2 * torch.as_tensor(math.pi)))*k/2
         )
         return log_prob

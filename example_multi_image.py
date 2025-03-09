@@ -19,7 +19,8 @@ pipeline.cuda()
 images = [
     Image.open(f"/data/ziqi/data/3dwild/pill/pill1.png"),
     Image.open(f"/data/ziqi/data/3dwild/pill/pill2.png"),
-    Image.open(f"/data/ziqi/data/3dwild/pill/pill3.png")
+    Image.open(f"/data/ziqi/data/3dwild/pill/pill3.png"),
+    Image.open(f"/data/ziqi/data/3dwild/pill/pill4.png")
 ]
 
 # Run the pipeline
@@ -70,7 +71,7 @@ extrinsics = [
 
 fovs = [587.4244, 550.6370, 582.3639, 519.0763, 508.4023]
 
-video_gs = render_utils.render_video(outputs['gaussian'][0], extrinsics, fovs)['color']
-video_mesh = render_utils.render_video(outputs['mesh'][0], extrinsics, fovs)['normal']
+video_gs = render_utils.render_video(outputs['gaussian'][0])['color']
+video_mesh = render_utils.render_video(outputs['mesh'][0])['normal']
 video = [np.concatenate([frame_gs, frame_mesh], axis=1) for frame_gs, frame_mesh in zip(video_gs, video_mesh)]
-imageio.mimsave("sample_multi0.mp4", video, fps=1)
+imageio.mimsave("wild/out/pill_nomask.mp4", video, fps=30)

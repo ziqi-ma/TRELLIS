@@ -26,6 +26,8 @@ from PIL import Image
 from trellis.utils import render_utils
 import imageio
 from trellis.modules.norm import LayerNorm32
+import wandb
+NORMAL = True
 
 def set_seed(seed):
     random.seed(seed)
@@ -231,7 +233,7 @@ class TrellisImageTo3DPipeline(Pipeline):
         reso = flow_model.resolution
         noise = torch.randn(num_samples, flow_model.in_channels, reso, reso, reso).to(self.device)
         sampler_params = {**self.sparse_structure_sampler_params, **sampler_params}
-        z_s = self.sparse_structure_sampler.sample_noised(
+        z_s = self.sparse_structure_sampler.sample(
             flow_model,
             noise,
             **cond,
@@ -361,13 +363,22 @@ class TrellisImageTo3DPipeline(Pipeline):
             coords=coords,
         )
         sampler_params = {**self.slat_sampler_params, **sampler_params}
-        slat = self.slat_sampler.sample_noised(
-            flow_model,
-            noise,
-            **cond,
-            **sampler_params,
-            verbose=True
-        ).samples
+        if NORMAL:
+            slat = self.slat_sampler.sample(
+                flow_model,
+                noise,
+                **cond,
+                **sampler_params,
+                verbose=True
+            ).samples
+        else:
+            slat = self.slat_sampler.sample_noised(
+                flow_model,
+                noise,
+                **cond,
+                **sampler_params,
+                verbose=True
+            ).samples
 
         std = torch.tensor(self.slat_normalization['std'])[None].to(slat.device)
         mean = torch.tensor(self.slat_normalization['mean'])[None].to(slat.device)
@@ -380,6 +391,7 @@ class TrellisImageTo3DPipeline(Pipeline):
         cond: dict,
         coords: torch.Tensor,
         sampler_params,
+        steps,
         eta
     ) -> sp.SparseTensor:
         """
@@ -397,6 +409,7 @@ class TrellisImageTo3DPipeline(Pipeline):
             coords=coords,
         )
         sampler_params = {**self.slat_sampler_params, **sampler_params}
+        sampler_params["steps"] = steps
 
         slat, timesteps, latents, logprobs = self.slat_sampler.sample_noised_with_logprobs(
             flow_model,
@@ -538,6 +551,8 @@ class TrellisImageTo3DPipeline(Pipeline):
         cond = self.get_cond([image])
         torch.manual_seed(seed)
         coords = self.sample_sparse_structure(cond, num_samples, sparse_structure_sampler_params)
+        #minz = coords[:,3].min()
+        #coords = coords[coords[:,3]>=minz+2]
         slat = self.sample_slat(cond, coords, slat_sampler_params)
         return self.decode_slat(slat, formats)
     
@@ -652,7 +667,6 @@ class TrellisImageTo3DPipeline(Pipeline):
             if num_images > num_steps:
                 print(f"\033[93mWarning: number of conditioning images is greater than number of steps for {sampler_name}. "
                     "This may lead to performance degradation.\033[0m")
-
             cond_indices = (np.arange(num_steps) % num_images).tolist()
             def _new_inference_model(self, model, x_t, t, cond, **kwargs):
                 cond_idx = cond_indices.pop(0)
@@ -753,6 +767,7 @@ class TrellisImageTo3DPipeline(Pipeline):
     def run_with_slat_logprobs(
         self,
         cond,
+        steps,
         eta,
         num_samples: int = 1,
         seed: int = 42,
@@ -773,7 +788,7 @@ class TrellisImageTo3DPipeline(Pipeline):
         
         torch.manual_seed(seed)
         coords = self.sample_sparse_structure(cond, num_samples, sparse_structure_sampler_params)
-        slat, slat_timesteps, slat_latents, slat_logprobs = self.sample_slat_with_logprobs(cond, coords, slat_sampler_params, eta)
+        slat, slat_timesteps, slat_latents, slat_logprobs = self.sample_slat_with_logprobs(cond, coords, slat_sampler_params, steps, eta)
         res = self.decode_slat(slat, formats)
         return res, slat_timesteps, slat_latents, slat_logprobs
     
@@ -969,15 +984,28 @@ class TrellisImageTo3DPipeline(Pipeline):
         preprocess_image: bool = True,
         adv_clip_max = 5,
         clip_range = 1e-4,
-        eta=0.2
+        steps=100,
+        eta=0.2,
+        inner_batch_size = 50
         ):
-
+        save_path = f"{edit_prompt}s{steps}ib{inner_batch_size}"
+        os.makedirs(f"out/{save_path}", exist_ok=True)
+        #torch.autograd.set_detect_anomaly(True)
+        # first load 
+        #self.models['slat_flow_model'] = torch.load('/data/ziqi/training_checkpts/trellisrl/slat_weights.pth')
         self.models["slat_flow_model"] = self.models["slat_flow_model"].float()
         self.models["slat_flow_model"].convert_to_fp32()
         self.models["slat_flow_model"].dtype=torch.float32
-        # this is causing so many issues!!!
+        # flaot16 was causing so many issues!!!
 
         optimizer = optim.Adam(self.models["slat_flow_model"].parameters(), lr=lr)
+
+        wandb.init(
+            project="rl",
+            name=f"{edit_prompt}s{steps}ib{inner_batch_size}"
+        )
+
+        iter = 0
         
         for epoch in range(n_epochs):
             
@@ -987,7 +1015,6 @@ class TrellisImageTo3DPipeline(Pipeline):
 
             #################### SAMPLING ####################
             self.models["slat_flow_model"].eval()
-            
 
             samples = []
             # for now, we just have a single sample
@@ -996,6 +1023,7 @@ class TrellisImageTo3DPipeline(Pipeline):
             # so is ss_timesteps
             slat_out, slat_timesteps, slat_latents, slat_log_probs = self.run_with_slat_logprobs(
                 cond,
+                steps=steps,
                 eta=eta,
                 seed = seed,
                 sparse_structure_sampler_params=sparse_structure_sampler_params,
@@ -1010,7 +1038,7 @@ class TrellisImageTo3DPipeline(Pipeline):
             rewards = self.get_reward_slat_text(slat_out, edit_prompt) # a number
             print(f"reward: {rewards}")
             # write to reward
-            with open('out/sample10/rewards', 'a') as file:
+            with open(f'out/{save_path}/rewards', 'a') as file:
                 file.write(f"{rewards}\n")
             
 
@@ -1038,6 +1066,7 @@ class TrellisImageTo3DPipeline(Pipeline):
 
             # train
             self.models['slat_flow_model'].train()
+            '''
             for name, module in self.models["slat_flow_model"].named_modules():
                 # Register a hook on each module
                 module.register_full_backward_hook(check_grad)
@@ -1052,7 +1081,7 @@ class TrellisImageTo3DPipeline(Pipeline):
 
                 if param.requires_grad:
                     param.register_hook(check_param_grad)
-        
+            '''
             onestep_sampler_params = {**self.slat_sampler_params, **slat_sampler_params}
             del onestep_sampler_params['steps']
             del onestep_sampler_params['rescale_t']
@@ -1071,12 +1100,11 @@ class TrellisImageTo3DPipeline(Pipeline):
                     list(enumerate(samples_batched)),
                     desc=f"Epoch {epoch}.{inner_epoch}: training"
                 ):
-
-                    for j in tqdm(
-                        np.arange(0,num_timesteps-1,10),#range(num_timesteps-1),
-                        desc="Timestep"
-                    ):
-                        
+                    # in each inner epoch, randomly sample inner_batch_size timesteps and form a minibatch
+                    t_samples = np.random.choice(num_timesteps-1, size=inner_batch_size, replace=False)
+                    losses = []
+                    for j in t_samples:#range(num_timesteps-1),:
+                        set_seed(seed+epoch+i+j)
                         slat_log_prob = self.slat_sampler.sample_onestep_logprob(
                             self.models['slat_flow_model'],
                             x_t = sample["latents"][j], # EXTENSION, :,j so first dim is batch
@@ -1097,8 +1125,11 @@ class TrellisImageTo3DPipeline(Pipeline):
                             -adv_clip_max,
                             adv_clip_max,
                         )
+                        #print(slat_log_prob)
+                        #print(sample["log_probs"][j])
 
                         ratio = torch.exp(slat_log_prob - sample["log_probs"][j]).cpu() # EXTENSION, :,j so first dim is batch
+                        #print(ratio)
                         unclipped_loss = -advantages * ratio
                         clipped_loss = -advantages * torch.clamp(
                             ratio,
@@ -1106,7 +1137,16 @@ class TrellisImageTo3DPipeline(Pipeline):
                             1.0 + clip_range,
                         )
                        
-                        loss = torch.mean(torch.maximum(unclipped_loss, clipped_loss))
+                        curloss = torch.mean(torch.maximum(unclipped_loss, clipped_loss))
+                        wandb.log({
+                            "iter": iter+1,
+                            "loss": curloss.item()
+                        })
+                        #print(curloss)
+                        losses.append(curloss.item())
+                        iter += 1
+
+                        curloss.backward()
                         
                         '''
                         # debugging values
@@ -1126,24 +1166,33 @@ class TrellisImageTo3DPipeline(Pipeline):
                         )
                         info["loss"].append(loss)
                         '''
-                        loss.backward()
+                    print(losses)
 
-                        # backward pass
-                        optimizer.step()
-                        optimizer.zero_grad()
+                    wandb.log({
+                            "iter": iter+1,
+                            "loss": np.array(losses).mean()
+                        })
+                    
+                    # step after the whole batch
+                    optimizer.step()
+                    optimizer.zero_grad()
 
-                if i % 5 == 0:
-                    self.models['slat_flow_model'].eval()
-                    outputs = self.run(image,seed=seed)
-                    # Render the outputs
-                    video = render_utils.render_video(outputs['gaussian'][0])['color']
-                    imageio.mimsave(f"out/sample10/epoch{epoch}.{i}_10new_gs_reward.mp4", video, fps=30)
-                    rewards = self.get_reward_slat_text(slat_out, edit_prompt) # a number
-                    print(f"reward: {rewards}")
-                    # write to reward
-                    with open('out/sample10/rewards', 'a') as file:
-                        file.write(f"{rewards}\n")
-                    self.models['slat_flow_model'].train()
+                outputs = self.run(image,seed=seed)
+                rewards = self.get_reward_slat_text(outputs, edit_prompt) # a number
+                print(f"reward: {rewards}")
+                wandb.log({
+                    "iter": iter,
+                    "reward": rewards
+                    })
+                # write to reward
+                with open(f'out/{save_path}/rewards', 'a') as file:
+                    file.write(f"{rewards}\n")
+                self.models['slat_flow_model'].train()
+
+            # Render the outputs
+            if epoch == 0 or (epoch+1) % 5 == 0:
+                video = render_utils.render_video(outputs['gaussian'][0])['color']
+                imageio.mimsave(f"out/{save_path}/epoch{epoch}_gs.mp4", video, fps=30)
 
         # save weight
         torch.save(self.models['slat_flow_model'], '/data/ziqi/training_checkpts/trellisrl/slat_weights.pth')
