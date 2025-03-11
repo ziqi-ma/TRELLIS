@@ -231,6 +231,7 @@ class SLatFlowModel(nn.Module):
         nn.init.constant_(self.out_layer.weight, 0)
         nn.init.constant_(self.out_layer.bias, 0)
 
+
     def forward(self, x: sp.SparseTensor, t: torch.Tensor, cond: torch.Tensor) -> sp.SparseTensor:
         h = self.input_layer(x).type(self.dtype)
         t_emb = self.t_embedder(t)

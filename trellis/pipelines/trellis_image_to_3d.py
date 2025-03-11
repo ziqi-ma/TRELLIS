@@ -13,6 +13,44 @@ from .base import Pipeline
 from . import samplers
 from ..modules import sparse as sp
 from ..representations import Gaussian, Strivec, MeshExtractResult
+import plotly.graph_objects as go
+from normalize_xyz import normalize_xyz
+
+def visualize_pts(points, colors, save_path=None, save_rendered_path=None):
+
+    if save_path:
+        np.save(f"{save_path}xyz.npy", points.cpu().numpy())
+        np.save(f"{save_path}rgb.npy", colors.cpu().numpy())
+    
+    points = points.cpu().numpy()
+    fig = go.Figure(data=[go.Scatter3d(
+        x=points[:, 0],
+        y=points[:, 1],
+        z=points[:, 2],
+        mode='markers',
+        marker=dict(
+            size=1.5,
+            color=(colors.cpu().numpy()*255).astype(int),  # Use RGB colors
+            opacity=0.5
+        ))])
+    fig.update_layout(
+        scene=dict(
+            bgcolor='rgb(220, 220, 220)'  #bgcolor='rgb(255, 255, 255)'# Set the 3D scene background to light grey
+        ),
+        paper_bgcolor='rgb(220, 220, 220)' #paper_bgcolor='rgb(255, 255, 255)'## Set the overall figure background to light grey
+    )
+    fig.update_layout(
+        scene_camera=dict(
+            up=dict(x=0, y=0, z=1),  # Adjust these values for your point cloud
+            eye=dict(x=0, y=0, z=1.5),  # Increase the values to move further away
+            center = dict(x=0,y=0,z=0)
+        )
+    )
+    
+    if save_rendered_path:
+        fig.write_image(save_rendered_path)
+    else:
+        fig.show()
 
 
 class TrellisImageTo3DPipeline(Pipeline):
@@ -264,6 +302,7 @@ class TrellisImageTo3DPipeline(Pipeline):
         slat_sampler_params: dict = {},
         formats: List[str] = ['mesh', 'gaussian', 'radiance_field'],
         preprocess_image: bool = True,
+        latent_save_prefix=""
     ) -> dict:
         """
         Run the pipeline.
@@ -280,7 +319,24 @@ class TrellisImageTo3DPipeline(Pipeline):
         cond = self.get_cond([image])
         torch.manual_seed(seed)
         coords = self.sample_sparse_structure(cond, num_samples, sparse_structure_sampler_params)
+        REMOVE_BASE = True
+        
+        print(coords.shape)
+        
+        if REMOVE_BASE:
+            coords_zmin = torch.min(coords[:,3])
+            print(coords_zmin)
+            coords_idx = coords[:,3]>coords_zmin+2
+            coords = coords[coords_idx,:]
+            print(coords.shape)
+        
+        torch.save(coords[:,1:], f"{latent_save_prefix}_xyz.pt")
+        #coords = normalize_xyz(coords)
+
+        visualize_pts(coords[:,1:], torch.zeros(coords[:,1:].shape))
         slat = self.sample_slat(cond, coords, slat_sampler_params)
+        #slat = torch.load(f"{latent_save_prefix}_latent.pt")
+        torch.save(slat, f"{latent_save_prefix}_latent.pt")
         return self.decode_slat(slat, formats)
 
     @contextmanager
@@ -373,6 +429,7 @@ class TrellisImageTo3DPipeline(Pipeline):
         slat_steps = {**self.slat_sampler_params, **slat_sampler_params}.get('steps')
         with self.inject_sampler_multi_image('slat_sampler', len(images), slat_steps, mode=mode):
             slat = self.sample_slat(cond, coords, slat_sampler_params)
+        
         return self.decode_slat(slat, formats)
     
 

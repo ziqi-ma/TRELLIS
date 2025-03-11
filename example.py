@@ -13,13 +13,16 @@ from trellis.utils import render_utils, postprocessing_utils
 pipeline = TrellisImageTo3DPipeline.from_pretrained("JeffreyXiang/TRELLIS-image-large")
 pipeline.cuda()
 
+name = "baseballcap"
+
 # Load an image
-image = Image.open("assets/example_image/T.png")
+image = Image.open(f"../instruct-pix2pix/imgs/edited/{name}.jpg")
 
 # Run the pipeline
 outputs = pipeline.run(
     image,
     seed=1,
+    latent_save_prefix=f"assets/catset/latents/{name}"
     # Optional parameters
     # sparse_structure_sampler_params={
     #     "steps": 12,
@@ -35,13 +38,16 @@ outputs = pipeline.run(
 # - outputs['radiance_field']: a list of radiance fields
 # - outputs['mesh']: a list of meshes
 
+
 # Render the outputs
-video = render_utils.render_video(outputs['gaussian'][0])['color']
-imageio.mimsave("sample_gs.mp4", video, fps=30)
+#video = render_utils.render_video(outputs['gaussian'][0])['color']
+#imageio.mimsave(f"assets/catset/{name}_gs.mp4", video, fps=30)
 video = render_utils.render_video(outputs['radiance_field'][0])['color']
-imageio.mimsave("sample_rf.mp4", video, fps=30)
+imageio.mimsave(f"assets/catset/renderings/{name}_rf.mp4", video, fps=30)
 video = render_utils.render_video(outputs['mesh'][0])['normal']
-imageio.mimsave("sample_mesh.mp4", video, fps=30)
+imageio.mimsave(f"assets/catset/renderings/{name}_mesh.mp4", video, fps=30)
+
+'''
 
 # GLB files can be extracted from the outputs
 glb = postprocessing_utils.to_glb(
@@ -52,6 +58,4 @@ glb = postprocessing_utils.to_glb(
     texture_size=1024,      # Size of the texture used for the GLB
 )
 glb.export("sample.glb")
-
-# Save Gaussians as PLY files
-outputs['gaussian'][0].save_ply("sample.ply")
+'''
