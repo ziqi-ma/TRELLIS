@@ -374,3 +374,39 @@ class TrellisImageTo3DPipeline(Pipeline):
         with self.inject_sampler_multi_image('slat_sampler', len(images), slat_steps, mode=mode):
             slat = self.sample_slat(cond, coords, slat_sampler_params)
         return self.decode_slat(slat, formats)
+    
+
+    @torch.no_grad()
+    def get_latents_multi_image(
+        self,
+        images: List[Image.Image],
+        num_samples: int = 1,
+        seed: int = 42,
+        sparse_structure_sampler_params: dict = {},
+        slat_sampler_params: dict = {},
+        formats: List[str] = ['mesh', 'gaussian', 'radiance_field'],
+        preprocess_image: bool = True,
+        mode: Literal['stochastic', 'multidiffusion'] = 'stochastic',
+    ) -> dict:
+        """
+        Run the pipeline with multiple images as condition
+
+        Args:
+            images (List[Image.Image]): The multi-view images of the assets
+            num_samples (int): The number of samples to generate.
+            sparse_structure_sampler_params (dict): Additional parameters for the sparse structure sampler.
+            slat_sampler_params (dict): Additional parameters for the structured latent sampler.
+            preprocess_image (bool): Whether to preprocess the image.
+        """
+        if preprocess_image:
+            images = [self.preprocess_image(image) for image in images]
+        cond = self.get_cond(images)
+        cond['neg_cond'] = cond['neg_cond'][:1]
+        torch.manual_seed(seed)
+        ss_steps = {**self.sparse_structure_sampler_params, **sparse_structure_sampler_params}.get('steps')
+        with self.inject_sampler_multi_image('sparse_structure_sampler', len(images), ss_steps, mode=mode):
+            coords = self.sample_sparse_structure(cond, num_samples, sparse_structure_sampler_params)
+        slat_steps = {**self.slat_sampler_params, **slat_sampler_params}.get('steps')
+        with self.inject_sampler_multi_image('slat_sampler', len(images), slat_steps, mode=mode):
+            slat = self.sample_slat(cond, coords, slat_sampler_params)
+        return coords, slat
