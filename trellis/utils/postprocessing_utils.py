@@ -16,7 +16,9 @@ from .random_utils import sphere_hammersley_sequence
 from .render_utils import render_multiview
 from ..renderers import GaussianRenderer
 from ..representations import Strivec, Gaussian, MeshExtractResult
-
+from pytorch3d.structures import Meshes
+from pytorch3d.renderer.mesh.textures import TexturesUV
+from pytorch3d.ops.sample_points_from_meshes import sample_points_from_meshes
 
 @torch.no_grad()
 def _fill_holes(
@@ -462,6 +464,91 @@ def to_glb(
     )
     mesh = trimesh.Trimesh(vertices, faces, visual=trimesh.visual.TextureVisuals(uv=uvs, material=material))
     return mesh
+
+def normalize_mesh(mesh):
+    verts = mesh.verts_packed()
+    center = verts.mean(0)
+    scale = max((verts - center).abs().max(0)[0])
+    mesh.offset_verts_(-center)
+    mesh.scale_verts_((0.75 / float(scale))) # put in 0.75-size box
+    return
+
+def to_sampled_surface_pts(
+    app_rep: Union[Strivec, Gaussian],
+    mesh: MeshExtractResult,
+    simplify: float = 0.95,
+    fill_holes: bool = True,
+    fill_holes_max_size: float = 0.04,
+    texture_size: int = 1024,
+    debug: bool = False,
+    verbose: bool = True,
+    n_pts = 5000
+):
+    """
+    Convert a generated asset to sampled pts, return xyz, rgb, normal (each is n_pts,3)
+
+    Args:
+        app_rep (Union[Strivec, Gaussian]): Appearance representation.
+        mesh (MeshExtractResult): Extracted mesh.
+        simplify (float): Ratio of faces to remove in simplification.
+        fill_holes (bool): Whether to fill holes in the mesh.
+        fill_holes_max_size (float): Maximum area of a hole to fill.
+        texture_size (int): Size of the texture.
+        debug (bool): Whether to print debug information.
+        verbose (bool): Whether to print progress.
+        n_pts: number of points to sample
+    """
+    vertices = mesh.vertices.cpu().numpy()
+    faces = mesh.faces.cpu().numpy()
+    
+    # mesh postprocess
+    vertices, faces = postprocess_mesh(
+        vertices, faces,
+        simplify=simplify > 0,
+        simplify_ratio=simplify,
+        fill_holes=fill_holes,
+        fill_holes_max_hole_size=fill_holes_max_size,
+        fill_holes_max_hole_nbe=int(250 * np.sqrt(1-simplify)),
+        fill_holes_resolution=1024,
+        fill_holes_num_views=1000,
+        debug=debug,
+        verbose=verbose,
+    )
+
+    # parametrize mesh
+    vertices, faces, uvs = parametrize_mesh(vertices, faces)
+
+    # bake texture
+    observations, extrinsics, intrinsics = render_multiview(app_rep, resolution=1024, nviews=100)
+    masks = [np.any(observation > 0, axis=-1) for observation in observations]
+    extrinsics = [extrinsics[i].cpu().numpy() for i in range(len(extrinsics))]
+    intrinsics = [intrinsics[i].cpu().numpy() for i in range(len(intrinsics))]
+    texture = bake_texture(
+        vertices, faces, uvs,
+        observations, masks, extrinsics, intrinsics,
+        texture_size=texture_size, mode='opt',
+        lambda_tv=0.01,
+        verbose=verbose
+    )
+    texture = Image.fromarray(texture)
+
+    # rotate mesh (from z-up to y-up)
+    vertices = vertices @ np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]])
+    texture = texture.convert("RGB")
+    texture_map = (torch.tensor(np.asarray(texture))/255)[:,:,:3]
+    print(uvs)
+    print(uvs.shape)
+    print(uvs.min())
+    '''
+    if verts_uv.min() < 0:
+        verts_uv = (verts_uv - verts_uv.min(0, keepdim=True)[0]) / (verts_uv.max(0, keepdim=True)[0] - verts_uv.min(0, keepdim=True)[0])
+    '''
+    mesh = Meshes(verts=[vertices], faces=[faces], textures=TexturesUV(maps=[texture_map], faces_uvs=[faces], verts_uvs=[uvs]))
+    normalize_mesh(mesh)
+
+    # sample n_pts pts
+    pts, normals, textures = sample_points_from_meshes(mesh, n_pts, return_normals= True, return_textures = True)
+    return pts, textures, normals
 
 
 def simplify_gs(

@@ -155,7 +155,7 @@ class TrellisImageTo3DPipeline(Pipeline):
         output = output[:, :, :3] * output[:, :, 3:4]
         output = Image.fromarray((output * 255).astype(np.uint8))
         return output
-
+    
     @torch.no_grad()
     def encode_image(self, image: Union[torch.Tensor, list[Image.Image]]) -> torch.Tensor:
         """
@@ -441,7 +441,6 @@ class TrellisImageTo3DPipeline(Pipeline):
         seed: int = 42,
         sparse_structure_sampler_params: dict = {},
         slat_sampler_params: dict = {},
-        formats: List[str] = ['mesh', 'gaussian', 'radiance_field'],
         preprocess_image: bool = True,
         mode: Literal['stochastic', 'multidiffusion'] = 'stochastic',
     ) -> dict:
