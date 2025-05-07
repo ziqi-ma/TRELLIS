@@ -261,6 +261,7 @@ class TrellisImageTo3DPipeline(Pipeline):
         slat_sampler_params: dict = {},
         formats: List[str] = ['mesh', 'gaussian', 'radiance_field'],
         preprocess_image: bool = True,
+        slat_save_path: str = None
     ) -> dict:
         """
         Run the pipeline.
@@ -280,6 +281,9 @@ class TrellisImageTo3DPipeline(Pipeline):
         torch.manual_seed(seed)
         coords = self.sample_sparse_structure(cond, num_samples, sparse_structure_sampler_params)
         slat = self.sample_slat(cond, coords, slat_sampler_params)
+
+        if slat_save_path:
+            torch.save(slat, slat_save_path)
         return self.decode_slat(slat, formats)
 
     @contextmanager
