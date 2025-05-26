@@ -318,15 +318,21 @@ def bake_texture(
         texture = torch.zeros((texture_size * texture_size, 3), dtype=torch.float32).cuda()
         texture_weights = torch.zeros((texture_size * texture_size), dtype=torch.float32).cuda()
         rastctx = utils3d.torch.RastContext(backend='cuda')
-        for observation, view, projection in tqdm(zip(observations, views, projections), total=len(observations), disable=not verbose, desc='Texture baking (fast)'):
+        for observation, view, projection, mask_in in tqdm(
+            zip(observations, views, projections, masks),
+            total=len(observations),
+            disable=not verbose,
+            desc="Texture baking (fast)",
+        ):
             with torch.no_grad():
                 rast = utils3d.torch.rasterize_triangle_faces(
                     rastctx, vertices[None], faces, observation.shape[1], observation.shape[0], uv=uvs[None], view=view, projection=projection
                 )
                 uv_map = rast['uv'][0].detach().flip(0)
-                mask = rast['mask'][0].detach().bool() & masks[0]
-            
+                mask = rast["mask"][0].detach().bool() & mask_in
+
             # nearest neighbor interpolation
+            uv_map = torch.clamp(uv_map, 0.0, 1.0 - 1e-6)
             uv_map = (uv_map * texture_size).floor().long()
             obs = observation[mask]
             uv_map = uv_map[mask]
@@ -364,11 +370,11 @@ def bake_texture(
 
         def cosine_anealing(optimizer, step, total_steps, start_lr, end_lr):
             return end_lr + 0.5 * (start_lr - end_lr) * (1 + np.cos(np.pi * step / total_steps))
-        
+
         def tv_loss(texture):
             return torch.nn.functional.l1_loss(texture[:, :-1, :, :], texture[:, 1:, :, :]) + \
                    torch.nn.functional.l1_loss(texture[:, :, :-1, :], texture[:, :, 1:, :])
-    
+
         total_steps = 2500
         with tqdm(total=total_steps, disable=not verbose, desc='Texture baking (opt): optimizing') as pbar:
             for step in range(total_steps):
@@ -421,7 +427,7 @@ def to_glb(
     """
     vertices = mesh.vertices.cpu().numpy()
     faces = mesh.faces.cpu().numpy()
-    
+
     # mesh postprocess
     vertices, faces = postprocess_mesh(
         vertices, faces,
@@ -445,11 +451,17 @@ def to_glb(
     extrinsics = [extrinsics[i].cpu().numpy() for i in range(len(extrinsics))]
     intrinsics = [intrinsics[i].cpu().numpy() for i in range(len(intrinsics))]
     texture = bake_texture(
-        vertices, faces, uvs,
-        observations, masks, extrinsics, intrinsics,
-        texture_size=texture_size, mode='opt',
+        vertices,
+        faces,
+        uvs,
+        observations,
+        masks,
+        extrinsics,
+        intrinsics,
+        texture_size=texture_size,
+        mode="fast",
         lambda_tv=0.01,
-        verbose=verbose
+        verbose=verbose,
     )
     texture = Image.fromarray(texture)
 
