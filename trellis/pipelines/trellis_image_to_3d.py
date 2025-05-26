@@ -262,7 +262,7 @@ class TrellisImageTo3DPipeline(Pipeline):
         formats: List[str] = ['mesh', 'gaussian', 'radiance_field'],
         preprocess_image: bool = True,
         return_slat: bool = False
-    ) -> dict:
+    ):
         """
         Run the pipeline.
 
