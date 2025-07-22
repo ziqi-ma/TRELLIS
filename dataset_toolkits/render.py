@@ -12,19 +12,23 @@ import numpy as np
 from utils import sphere_hammersley_sequence
 
 
-BLENDER_LINK = 'https://download.blender.org/release/Blender3.0/blender-3.0.1-linux-x64.tar.xz'
+BLENDER_LINK = (
+    "https://download.blender.org/release/Blender3.6/blender-3.6.7-linux-x64.tar.xz"
+)
 BLENDER_INSTALLATION_PATH = "./blender_bin"
-BLENDER_PATH = f'{BLENDER_INSTALLATION_PATH}/blender-3.0.1-linux-x64/blender'
+BLENDER_PATH = f"{BLENDER_INSTALLATION_PATH}/blender-3.6.7-linux-x64/blender"
 
 def _install_blender():
     if not os.path.exists(BLENDER_PATH):
         os.system(f'wget {BLENDER_LINK} -P {BLENDER_INSTALLATION_PATH}')
-        os.system(f'tar -xvf {BLENDER_INSTALLATION_PATH}/blender-3.0.1-linux-x64.tar.xz -C {BLENDER_INSTALLATION_PATH}')
+        os.system(
+            f"tar -xvf {BLENDER_INSTALLATION_PATH}/blender-3.6.7-linux-x64.tar.xz -C {BLENDER_INSTALLATION_PATH}"
+        )
 
 
 def _render(file_path, sha256, output_dir, num_views):
     output_folder = os.path.join(output_dir, 'renders', sha256)
-    
+
     # Build camera {yaw, pitch, radius, fov}
     yaws = []
     pitchs = []
@@ -36,7 +40,7 @@ def _render(file_path, sha256, output_dir, num_views):
     radius = [2] * num_views
     fov = [40 / 180 * np.pi] * num_views
     views = [{'yaw': y, 'pitch': p, 'radius': r, 'fov': f} for y, p, r, f in zip(yaws, pitchs, radius, fov)]
-    
+
     args = [
         BLENDER_PATH, '-b', '-P', os.path.join(os.path.dirname(__file__), 'blender_script', 'render.py'),
         '--',
@@ -49,9 +53,9 @@ def _render(file_path, sha256, output_dir, num_views):
     ]
     if file_path.endswith('.blend'):
         args.insert(1, file_path)
-    
+
     call(args, stdout=DEVNULL, stderr=DEVNULL)
-    
+
     if os.path.exists(os.path.join(output_folder, 'transforms.json')):
         return {'sha256': sha256, 'rendered': True}
 
