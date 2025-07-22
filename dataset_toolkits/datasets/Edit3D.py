@@ -51,7 +51,7 @@ def get_metadata(original_3d, edited_3d, metadata_path, **kwargs):
             seen.add(row["target"])
     
     return df
-        
+
 
 def download(metadata, output_dir, **kwargs):
     metadata['local_path'] = metadata['file_identifier']
@@ -65,7 +65,7 @@ def foreach_instance(metadata, output_dir, func, max_workers=None, desc='Process
     from tqdm import tqdm
     import tempfile
     import zipfile
-    
+
     # load metadata
     metadata = metadata.to_dict('records')
 
@@ -73,8 +73,9 @@ def foreach_instance(metadata, output_dir, func, max_workers=None, desc='Process
     records = []
     max_workers = max_workers or os.cpu_count()
     try:
-        with ThreadPoolExecutor(max_workers=max_workers) as executor, \
-            tqdm(total=len(metadata), desc=desc) as pbar:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor, tqdm(
+            total=len(metadata), desc=desc, smoothing=0
+        ) as pbar:
             def worker(metadatum):
                 try:
                     file = metadatum["local_path"]
@@ -85,10 +86,10 @@ def foreach_instance(metadata, output_dir, func, max_workers=None, desc='Process
                 except Exception as e:
                     print(f"Error processing object {metadatum["sha256"]}: {e}")
                     pbar.update()
-            
+
             executor.map(worker, metadata)
             executor.shutdown(wait=True)
     except:
         print("Error happened during processing.")
-        
+
     return pd.DataFrame.from_records(records)

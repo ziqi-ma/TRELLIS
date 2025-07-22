@@ -34,6 +34,8 @@ EXT = {
 }
 
 def init_render(engine='CYCLES', resolution=512, geo_mode=False):
+
+    bpy.context.scene.render.use_persistent_data = True
     bpy.context.scene.render.engine = engine
     bpy.context.scene.render.resolution_x = resolution
     bpy.context.scene.render.resolution_y = resolution
@@ -41,7 +43,7 @@ def init_render(engine='CYCLES', resolution=512, geo_mode=False):
     bpy.context.scene.render.image_settings.file_format = 'PNG'
     bpy.context.scene.render.image_settings.color_mode = 'RGBA'
     bpy.context.scene.render.film_transparent = True
-    
+
     bpy.context.scene.cycles.device = 'GPU'
     bpy.context.scene.cycles.samples = 128 if not geo_mode else 1
     bpy.context.scene.cycles.filter_type = 'BOX'
@@ -50,30 +52,30 @@ def init_render(engine='CYCLES', resolution=512, geo_mode=False):
     bpy.context.scene.cycles.glossy_bounces = 1
     bpy.context.scene.cycles.transparent_max_bounces = 3 if not geo_mode else 0
     bpy.context.scene.cycles.transmission_bounces = 3 if not geo_mode else 1
-    bpy.context.scene.cycles.use_denoising = True
-        
-    bpy.context.preferences.addons['cycles'].preferences.get_devices()
+    bpy.context.scene.cycles.use_denoising = False
+
     bpy.context.preferences.addons['cycles'].preferences.compute_device_type = 'CUDA'
-    
+    bpy.context.preferences.addons["cycles"].preferences.refresh_devices()
+
 def init_nodes(save_depth=False, save_normal=False, save_albedo=False, save_mist=False):
     if not any([save_depth, save_normal, save_albedo, save_mist]):
         return {}, {}
     outputs = {}
     spec_nodes = {}
-    
+
     bpy.context.scene.use_nodes = True
     bpy.context.scene.view_layers['View Layer'].use_pass_z = save_depth
     bpy.context.scene.view_layers['View Layer'].use_pass_normal = save_normal
     bpy.context.scene.view_layers['View Layer'].use_pass_diffuse_color = save_albedo
     bpy.context.scene.view_layers['View Layer'].use_pass_mist = save_mist
-    
+
     nodes = bpy.context.scene.node_tree.nodes
     links = bpy.context.scene.node_tree.links
     for n in nodes:
         nodes.remove(n)
-    
+
     render_layers = nodes.new('CompositorNodeRLayers')
-    
+
     if save_depth:
         depth_file_output = nodes.new('CompositorNodeOutputFile')
         depth_file_output.base_path = ''
@@ -87,13 +89,13 @@ def init_nodes(save_depth=False, save_normal=False, save_albedo=False, save_mist
         map.inputs[2].default_value = 10 # (max value you will be getting)
         map.inputs[3].default_value = 0  # (min value you will map to)
         map.inputs[4].default_value = 1  # (max value you will map to)
-        
+
         links.new(render_layers.outputs['Depth'], map.inputs[0])
         links.new(map.outputs[0], depth_file_output.inputs[0])
-        
+
         outputs['depth'] = depth_file_output
         spec_nodes['depth_map'] = map
-    
+
     if save_normal:
         normal_file_output = nodes.new('CompositorNodeOutputFile')
         normal_file_output.base_path = ''
@@ -101,11 +103,11 @@ def init_nodes(save_depth=False, save_normal=False, save_albedo=False, save_mist
         normal_file_output.format.file_format = 'OPEN_EXR'
         normal_file_output.format.color_mode = 'RGB'
         normal_file_output.format.color_depth = '16'
-        
+
         links.new(render_layers.outputs['Normal'], normal_file_output.inputs[0])
-        
+
         outputs['normal'] = normal_file_output
-    
+
     if save_albedo:
         albedo_file_output = nodes.new('CompositorNodeOutputFile')
         albedo_file_output.base_path = ''
@@ -113,30 +115,30 @@ def init_nodes(save_depth=False, save_normal=False, save_albedo=False, save_mist
         albedo_file_output.format.file_format = 'PNG'
         albedo_file_output.format.color_mode = 'RGBA'
         albedo_file_output.format.color_depth = '8'
-        
+
         alpha_albedo = nodes.new('CompositorNodeSetAlpha')
-        
+
         links.new(render_layers.outputs['DiffCol'], alpha_albedo.inputs['Image'])
         links.new(render_layers.outputs['Alpha'], alpha_albedo.inputs['Alpha'])
         links.new(alpha_albedo.outputs['Image'], albedo_file_output.inputs[0])
-        
+
         outputs['albedo'] = albedo_file_output
-        
+
     if save_mist:
         bpy.data.worlds['World'].mist_settings.start = 0
         bpy.data.worlds['World'].mist_settings.depth = 10
-        
+
         mist_file_output = nodes.new('CompositorNodeOutputFile')
         mist_file_output.base_path = ''
         mist_file_output.file_slots[0].use_node_format = True
         mist_file_output.format.file_format = 'PNG'
         mist_file_output.format.color_mode = 'BW'
         mist_file_output.format.color_depth = '16'
-        
+
         links.new(render_layers.outputs['Mist'], mist_file_output.inputs[0])
-        
+
         outputs['mist'] = mist_file_output
-        
+
     return outputs, spec_nodes
 
 def init_scene() -> None:
@@ -249,7 +251,7 @@ def load_object(object_path: str) -> None:
         import_function(filepath=object_path, merge_vertices=True, import_shading='NORMALS')
     else:
         import_function(filepath=object_path)
-        
+
 def delete_invisible_objects() -> None:
     """Deletes all invisible objects in the scene.
 
@@ -270,7 +272,7 @@ def delete_invisible_objects() -> None:
     invisible_collections = [col for col in bpy.data.collections if col.hide_viewport]
     for col in invisible_collections:
         bpy.data.collections.remove(col)
-        
+
 def split_mesh_normal():
     bpy.ops.object.select_all(action="DESELECT")
     objs = [obj for obj in bpy.context.scene.objects if obj.type == "MESH"]
@@ -282,7 +284,7 @@ def split_mesh_normal():
     bpy.ops.mesh.split_normals()
     bpy.ops.object.mode_set(mode='OBJECT')
     bpy.ops.object.select_all(action="DESELECT")
-            
+
 def delete_custom_normals():
      for this_obj in bpy.data.objects:
         if this_obj.type == "MESH":
@@ -308,7 +310,7 @@ def unhide_all_objects() -> None:
     """
     for obj in bpy.context.scene.objects:
         obj.hide_set(False)
-        
+
 def convert_to_meshes() -> None:
     """Converts all objects in the scene to meshes.
 
@@ -320,7 +322,7 @@ def convert_to_meshes() -> None:
     for obj in bpy.context.scene.objects:
         obj.select_set(True)
     bpy.ops.object.convert(target="MESH")
-        
+
 def triangulate_meshes() -> None:
     """Triangulates all meshes in the scene.
 
@@ -415,14 +417,14 @@ def get_transform_matrix(obj: bpy.types.Object) -> list:
 
 def main(arg):
     os.makedirs(arg.output_folder, exist_ok=True)
-    
+
     # Initialize context
     init_render(engine=arg.engine, resolution=arg.resolution, geo_mode=arg.geo_mode)
     outputs, spec_nodes = init_nodes(
         save_depth=arg.save_depth,
         save_normal=arg.save_normal,
         save_albedo=arg.save_albedo,
-        save_mist=arg.save_mist
+        save_mist=arg.save_mist,
     )
     if arg.object.endswith(".blend"):
         delete_invisible_objects()
@@ -433,11 +435,11 @@ def main(arg):
             split_mesh_normal()
         # delete_custom_normals()
     print('[INFO] Scene initialized.')
-    
+
     # normalize scene
     scale, offset = normalize_scene()
     print('[INFO] Scene normalized.')
-    
+
     # Initialize camera and lighting
     cam = init_camera()
     init_lighting()
@@ -446,7 +448,7 @@ def main(arg):
     # Override material
     if arg.geo_mode:
         override_material()
-    
+
     # Create a list of views
     to_export = {
         "aabb": [[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
@@ -462,15 +464,15 @@ def main(arg):
             view['radius'] * np.sin(view['pitch'])
         )
         cam.data.lens = 16 / np.tan(view['fov'] / 2)
-        
+
         if arg.save_depth:
             spec_nodes['depth_map'].inputs[1].default_value = view['radius'] - 0.5 * np.sqrt(3)
             spec_nodes['depth_map'].inputs[2].default_value = view['radius'] + 0.5 * np.sqrt(3)
-        
+
         bpy.context.scene.render.filepath = os.path.join(arg.output_folder, f'{i:03d}.png')
         for name, output in outputs.items():
             output.file_slots[0].path = os.path.join(arg.output_folder, f'{i:03d}_{name}')
-            
+
         # Render the scene
         bpy.ops.render.render(write_still=True)
         bpy.context.view_layer.update()
@@ -478,7 +480,7 @@ def main(arg):
             ext = EXT[output.format.file_format]
             path = glob.glob(f'{output.file_slots[0].path}*.{ext}')[0]
             os.rename(path, f'{output.file_slots[0].path}.{ext}')
-            
+
         # Save camera parameters
         metadata = {
             "file_path": f'{i:03d}.png',
@@ -491,22 +493,22 @@ def main(arg):
                 'max': view['radius'] + 0.5 * np.sqrt(3)
             }
         to_export["frames"].append(metadata)
-    
+
     # Save the camera parameters
     with open(os.path.join(arg.output_folder, 'transforms.json'), 'w') as f:
         json.dump(to_export, f, indent=4)
-        
+
     if arg.save_mesh:
         # triangulate meshes
         unhide_all_objects()
         convert_to_meshes()
         triangulate_meshes()
         print('[INFO] Meshes triangulated.')
-        
+
         # export ply mesh
         bpy.ops.export_mesh.ply(filepath=os.path.join(arg.output_folder, 'mesh.ply'))
 
-        
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Renders given obj file by rotation a camera around it.')
     parser.add_argument('--views', type=str, help='JSON string of views. Contains a list of {yaw, pitch, radius, fov} object.')
@@ -525,4 +527,3 @@ if __name__ == '__main__':
     args = parser.parse_args(argv)
 
     main(args)
-    
