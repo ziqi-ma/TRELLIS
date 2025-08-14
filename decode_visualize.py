@@ -2,8 +2,7 @@ import os
 import torch
 import imageio
 from PIL import Image, ImageDraw, ImageFont
-from trellis.pipelines import TrellisImageTo3DPipeline
-from trellis.utils import render_utils, postprocessing_utils
+from trellis.utils import render_utils
 from trellis.modules.sparse.basic import SparseTensor
 import numpy as np
 from safetensors.torch import load_model
@@ -12,7 +11,7 @@ from trellis.models.structured_latent_vae import SLatGaussianDecoder
 os.environ['SPCONV_ALGO'] = 'native'        # Can be 'native' or 'auto', default is 'auto'.
                                             # 'auto' is faster but will do benchmarking at the beginning.
                                             # Recommended to set to 'native' if run only once.
-
+from tqdm import tqdm
 
 def load_gs_decoder(gs_decoder_save_path):
     gs_decoder = SLatGaussianDecoder(
@@ -49,12 +48,13 @@ def load_gs_decoder(gs_decoder_save_path):
 
 def load_sparse_tensor(in_path, eps=1, mode="l1"):
 
-    slat_dense = torch.load(in_path)
+    slat_dense = torch.load(in_path, map_location="cpu")
 
     if mode == "l1":
         l1_sum = torch.abs(slat_dense).sum(dim=-1)
         nonzero_idxs = l1_sum > eps
         coords = (nonzero_idxs*1).nonzero(as_tuple=False)  # shape: (n, 3)
+        print(coords)
         features = slat_dense[nonzero_idxs]
     elif mode == "any":
         feature_lessthaneps = (torch.abs(slat_dense) < eps)*1
@@ -96,10 +96,11 @@ def tile_images_2x2(imgs):
 
 
 def visualize_obj(gs_decoder, dir, name, save_path, eps):
-    suffixes = ["_ori.pt", "_pred.pt", "_gt.pt"]
+    suffixes = ["_orig.pt", "_pred.pt", "_gt.pt"]
     labels = ["Input", "Pred", "GT"]
     outs = []
     for suffix in suffixes:
+        print(suffix)
         slat = load_sparse_tensor(f"{dir}/{name}{suffix}", eps=eps).float().cuda()
         # sparsify
         outputs = gs_decoder(slat)#pipeline.decode_slat(slat, ["gaussian"])
@@ -136,18 +137,22 @@ def visualize_obj(gs_decoder, dir, name, save_path, eps):
     return
 
 if __name__ == "__main__":
-    gs_decoder_save_path = "/data/ziqi/checkpoints/trellis/slat_dec_gs_swin8_B_64l8gs32_fp16.safetensors"
-    dir = "/data/ziqi/data/fractaledit/2kbs32w2contpredguidingblr0.002/mariter4,4,4-2k/"
-    save_path = f"{dir}/visualize"
-    epoch_number = "epoch719"
+    gs_decoder_save_path = "slat_dec_gs_swin8_B_64l8gs32_fp16.safetensors"
+    dir = "/data/harry/runs/from_jitteredblr0.002/evaluation/epoch_449_train"
+    save_path = f"from_jittered_449_train"
+
+    print("hello")
 
     os.makedirs(save_path, exist_ok=True)
     gs_decoder = load_gs_decoder(gs_decoder_save_path)
     all_names = list(set(["_".join(name.split("_")[:-1]) for name in os.listdir(dir)]))
-    names = [name for name in all_names if epoch_number in name]
-    for name in names:
+    all_names = sorted(all_names)
+    print(all_names)
+    for name in tqdm(all_names):
         print(name)
-        visualize_obj(gs_decoder, dir, name, save_path, eps=10)
-
-    
+        try:
+            with torch.no_grad():
+                visualize_obj(gs_decoder, dir, name, save_path, eps=10)
+        except Exception as e:
+            print(f"Error processing {name}: {e}")
 

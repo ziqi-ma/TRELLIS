@@ -118,3 +118,19 @@ def render_snapshot(samples, resolution=512, bg_color=(0, 0, 0), offset=(-16 / 1
     pitch = [offset[1] for _ in range(4)]
     extrinsics, intrinsics = yaw_pitch_r_fov_to_extrinsics_intrinsics(yaw, pitch, r, fov)
     return render_frames(samples, extrinsics, intrinsics, {'resolution': resolution, 'bg_color': bg_color}, **kwargs)
+
+def render_canonical_views(
+    sample, resolution=512, bg_color=(1, 1, 1), r=2, fov=40, **kwargs
+):
+    yaws = [-1.4, 3.14, 3.14, 1.57 / 2]
+    pitch = [0, 0, 1.3, 3.14 / 6]
+    extrinsics, intrinsics = yaw_pitch_r_fov_to_extrinsics_intrinsics(
+        yaws, pitch, r, fov
+    )
+    return render_frames(
+        sample,
+        extrinsics,
+        intrinsics,
+        {"resolution": resolution, "bg_color": bg_color},
+        **kwargs,
+    )
