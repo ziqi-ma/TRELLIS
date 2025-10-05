@@ -76,7 +76,6 @@
         --xformers              Install xformers
         --flash-attn            Install flash-attn
         --diffoctreerast        Install diffoctreerast
-        --vox2seq               Install vox2seq
         --spconv                Install spconv
         --mipgaussian           Install mip-splatting
         --kaolin                Install kaolin
