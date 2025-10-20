@@ -18,7 +18,7 @@ IMPORT_FUNCTIONS: Dict[str, Callable] = {
     "stl": bpy.ops.import_mesh.stl,
     "usda": bpy.ops.import_scene.usda,
     "dae": bpy.ops.wm.collada_import,
-    "ply": bpy.ops.import_mesh.ply,
+    "ply": bpy.ops.wm.ply_import,
     "abc": bpy.ops.wm.alembic_import,
     "blend": bpy.ops.wm.append,
 }
@@ -506,7 +506,7 @@ def main(arg):
         print('[INFO] Meshes triangulated.')
 
         # export ply mesh
-        bpy.ops.export_mesh.ply(filepath=os.path.join(arg.output_folder, 'mesh.ply'))
+        bpy.ops.wm.ply_export(filepath=os.path.join(arg.output_folder, "mesh.ply"))
 
 
 if __name__ == '__main__':

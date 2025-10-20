@@ -13,16 +13,16 @@ from utils import sphere_hammersley_sequence
 
 
 BLENDER_LINK = (
-    "https://download.blender.org/release/Blender3.6/blender-3.6.7-linux-x64.tar.xz"
+    "https://download.blender.org/release/Blender4.5/blender-4.5.3-linux-x64.tar.xz"
 )
 BLENDER_INSTALLATION_PATH = "./blender_bin"
-BLENDER_PATH = f"{BLENDER_INSTALLATION_PATH}/blender-3.6.7-linux-x64/blender"
+BLENDER_PATH = f"{BLENDER_INSTALLATION_PATH}/blender-4.5.3-linux-x64/blender"
 
 def _install_blender():
     if not os.path.exists(BLENDER_PATH):
         os.system(f'wget {BLENDER_LINK} -P {BLENDER_INSTALLATION_PATH}')
         os.system(
-            f"tar -xvf {BLENDER_INSTALLATION_PATH}/blender-3.6.7-linux-x64.tar.xz -C {BLENDER_INSTALLATION_PATH}"
+            f"tar -xvf {BLENDER_INSTALLATION_PATH}/blender-4.5.3-linux-x64.tar.xz -C {BLENDER_INSTALLATION_PATH}"
         )
 
 
